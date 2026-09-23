@@ -1,0 +1,7 @@
+{
+  "dart.projectSearchDepth": 4,
+  "files.exclude": {
+    "**/.dart_tool": true,
+    "**/build": true
+  }
+}

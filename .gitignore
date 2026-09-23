@@ -1,0 +1,14 @@
+# Dart / Flutter generated files
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+**/build/
+**/coverage/
+
+# Machine-specific IDE and Android SDK settings
+**/.idea/workspace.xml
+**/android/local.properties
+
+# Keep the separate nested repository out of this repository's index.
+/Riding-App/
