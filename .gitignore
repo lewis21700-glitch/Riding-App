@@ -5,6 +5,7 @@
 **/.packages
 **/build/
 **/coverage/
+**/GeneratedPluginRegistrant.java
 
 # Machine-specific IDE and Android SDK settings
 **/.idea/workspace.xml

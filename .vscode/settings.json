@@ -1,5 +1,9 @@
 {
-  "dart.projectSearchDepth": 4,
+  "dart.projectSearchDepth": 1,
+  "dart.analysisExcludedFolders": [
+    "${workspaceFolder}/MOBILE/mobile_backup",
+    "${workspaceFolder}/MOBILE/mobile_old"
+  ],
   "files.exclude": {
     "**/.dart_tool": true,
     "**/build": true

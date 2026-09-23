@@ -1015,6 +1015,12 @@ class ProfilePage extends StatelessWidget {
     final apiKeyCtrl = TextEditingController();
 
     final existing = await Session.chatGPTAccount();
+    if (!context.mounted) {
+      accountCtrl.dispose();
+      apiKeyCtrl.dispose();
+      return;
+    }
+
     if (existing != null) {
       accountCtrl.text = existing['account'] ?? '';
       apiKeyCtrl.text = existing['apiKey'] ?? '';

@@ -1,0 +1,14 @@
+{
+  "folders": [
+    {
+      "path": "MOBILE/mobile"
+    }
+  ],
+  "settings": {
+    "dart.projectSearchDepth": 1,
+    "files.exclude": {
+      "**/.dart_tool": true,
+      "**/build": true
+    }
+  }
+}
