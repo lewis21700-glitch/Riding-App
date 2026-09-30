@@ -1,10 +1,16 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'driver_home_page.dart';
 
-const String apiBase = 'http://10.0.2.2:3000/api';
+const String apiBase = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: 'http://10.0.2.2:3000/api',
+);
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() => runApp(const RideApp());
 
@@ -14,6 +20,7 @@ class RideApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: appNavigatorKey,
       title: 'RideApp',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -43,7 +50,7 @@ class RideApp extends StatelessWidget {
 }
 
 class Api {
-  static Future<Map<String, dynamic>> request(
+  static Future<dynamic> request(
     String method,
     String path, {
     Map<String, dynamic>? body,
@@ -55,20 +62,26 @@ class Api {
       if (token != null) 'Authorization': 'Bearer $token',
     };
 
+    final encodedBody = body == null ? null : jsonEncode(body);
+    final request = http.Request(method, uri)..headers.addAll(headers);
+    if (encodedBody != null) request.body = encodedBody;
+    final client = http.Client();
     late http.Response response;
-    if (method == 'POST') {
-      response = await http.post(uri, headers: headers, body: jsonEncode(body ?? {}));
-    } else if (method == 'PUT') {
-      response = await http.put(uri, headers: headers, body: jsonEncode(body ?? {}));
-    } else {
-      response = await http.get(uri, headers: headers);
+    try {
+      final streamed =
+          await client.send(request).timeout(const Duration(seconds: 20));
+      response = await http.Response.fromStream(streamed);
+    } finally {
+      client.close();
     }
 
     dynamic decoded;
     try {
       decoded = jsonDecode(response.body);
     } catch (_) {
-      decoded = {'error': response.body.isEmpty ? 'Server error' : response.body};
+      decoded = {
+        'error': response.body.isEmpty ? 'Server error' : response.body
+      };
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -79,7 +92,7 @@ class Api {
       );
     }
 
-    return Map<String, dynamic>.from(decoded as Map);
+    return decoded;
   }
 }
 
@@ -99,30 +112,6 @@ class Session {
   static Future<String?> token() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('token');
-  }
-
-  static Future<void> saveChatGPTAccount(String account, String apiKey) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('chatgpt_account', account);
-    await prefs.setString('chatgpt_api_key', apiKey);
-  }
-
-  static Future<Map<String, String>?> chatGPTAccount() async {
-    final prefs = await SharedPreferences.getInstance();
-    final account = prefs.getString('chatgpt_account');
-    final apiKey = prefs.getString('chatgpt_api_key');
-
-    if (account == null || apiKey == null) {
-      return null;
-    }
-
-    return {'account': account, 'apiKey': apiKey};
-  }
-
-  static Future<void> clearChatGPTAccount() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('chatgpt_account');
-    await prefs.remove('chatgpt_api_key');
   }
 
   static Future<void> clear() async {
@@ -153,7 +142,13 @@ class _SplashGateState extends State<SplashGate> {
     if (!mounted) return;
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => user == null ? const LoginPage() : const HomePage()),
+      MaterialPageRoute(
+        builder: (_) => user == null
+            ? const LoginPage()
+            : user['role'] == 'driver'
+                ? DriverHomePage(user: user, onLogout: _signOut)
+                : const HomePage(),
+      ),
     );
   }
 
@@ -165,13 +160,24 @@ class _SplashGateState extends State<SplashGate> {
             children: [
               _TaxiLogo(),
               SizedBox(height: 16),
-              Text('RideApp', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800)),
+              Text('RideApp',
+                  style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800)),
               SizedBox(height: 6),
               Text('Cambodia ride-hailing'),
             ],
           ),
         ),
       );
+}
+
+Future<void> _signOut() async {
+  await Session.clear();
+  final navigator = appNavigatorKey.currentState;
+  if (navigator == null) return;
+  navigator.pushAndRemoveUntil(
+    MaterialPageRoute(builder: (_) => const LoginPage()),
+    (_) => false,
+  );
 }
 
 class _TaxiLogo extends StatelessWidget {
@@ -185,7 +191,8 @@ class _TaxiLogo extends StatelessWidget {
           borderRadius: BorderRadius.circular(22),
         ),
         alignment: Alignment.center,
-        child: const Icon(Icons.local_taxi_rounded, color: Colors.white, size: 42),
+        child:
+            const Icon(Icons.local_taxi_rounded, color: Colors.white, size: 42),
       );
 }
 
@@ -212,9 +219,17 @@ class _LoginPageState extends State<LoginPage> {
         '/login',
         body: {'email': email.text.trim(), 'password': password.text},
       );
-      await Session.save(Map<String, dynamic>.from(result['user']), result['token'].toString());
+      final user = Map<String, dynamic>.from(result['user']);
+      await Session.save(user, result['token'].toString());
       if (!mounted) return;
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomePage()));
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => user['role'] == 'driver'
+              ? DriverHomePage(user: user, onLogout: _signOut)
+              : const HomePage(),
+        ),
+      );
     } catch (e) {
       _msg(e.toString().replaceFirst('Exception: ', ''));
     } finally {
@@ -223,7 +238,8 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   void _msg(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -248,7 +264,8 @@ class _LoginPageState extends State<LoginPage> {
                     const SizedBox(height: 18),
                     const Text('Welcome back',
                         textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 29, fontWeight: FontWeight.w800)),
+                        style: TextStyle(
+                            fontSize: 29, fontWeight: FontWeight.w800)),
                     const SizedBox(height: 7),
                     const Text('Sign in to book a ride',
                         textAlign: TextAlign.center,
@@ -281,7 +298,8 @@ class _LoginPageState extends State<LoginPage> {
                             ? const SizedBox(
                                 width: 22,
                                 height: 22,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
                               )
                             : const Text('Login'),
                       ),
@@ -291,7 +309,8 @@ class _LoginPageState extends State<LoginPage> {
                       onPressed: () {
                         Navigator.push(
                           context,
-                          MaterialPageRoute(builder: (_) => const RegisterPage()),
+                          MaterialPageRoute(
+                              builder: (_) => const RegisterPage()),
                         );
                       },
                       child: const Text('Create account'),
@@ -316,29 +335,69 @@ class _RegisterPageState extends State<RegisterPage> {
   final email = TextEditingController();
   final phone = TextEditingController();
   final password = TextEditingController();
+  final vehicleType = TextEditingController(text: 'Car');
+  final vehicleModel = TextEditingController();
+  final plateNumber = TextEditingController();
+  String role = 'rider';
   bool loading = false;
 
   Future<void> register() async {
-    if (name.text.trim().isEmpty || email.text.trim().isEmpty || password.text.isEmpty) {
+    if (name.text.trim().isEmpty ||
+        email.text.trim().isEmpty ||
+        password.text.isEmpty) {
       _msg('Name, email and password are required.');
+      return;
+    }
+    if (password.text.length < 8) {
+      _msg('Choose a password with at least 8 characters.');
+      return;
+    }
+    if (role == 'driver' &&
+        [vehicleType, vehicleModel, plateNumber]
+            .any((field) => field.text.trim().isEmpty)) {
+      _msg('Add your vehicle type, model and plate number.');
       return;
     }
     setState(() => loading = true);
     try {
-      await Api.request(
+      final data = await Api.request(
         'POST',
-        '/users',
+        '/register',
         body: {
           'name': name.text.trim(),
           'email': email.text.trim(),
           'phone': phone.text.trim(),
           'password': password.text,
-          'role': 'rider',
+          'role': role,
         },
       );
       if (!mounted) return;
-      _msg('Account created. Please login.');
-      Navigator.pop(context);
+      final user = Map<String, dynamic>.from(data['user']);
+      final token = data['token'].toString();
+      await Session.save(user, token);
+      if (role == 'driver') {
+        try {
+          await Api.request('POST', '/my-vehicle', token: token, body: {
+            'vehicle_type': vehicleType.text.trim(),
+            'vehicle_model': vehicleModel.text.trim(),
+            'plate_number': plateNumber.text.trim().toUpperCase(),
+          });
+        } catch (e) {
+          if (!mounted) return;
+          _msg(
+              'Account created. Add your vehicle after signing in: ${e.toString().replaceFirst('Exception: ', '')}');
+        }
+      }
+      if (!mounted) return;
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(
+          builder: (_) => role == 'driver'
+              ? DriverHomePage(user: user, onLogout: _signOut)
+              : const HomePage(),
+        ),
+        (_) => false,
+      );
     } catch (e) {
       _msg(e.toString().replaceFirst('Exception: ', ''));
     } finally {
@@ -346,7 +405,8 @@ class _RegisterPageState extends State<RegisterPage> {
     }
   }
 
-  void _msg(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+  void _msg(String s) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 
   @override
   void dispose() {
@@ -354,6 +414,9 @@ class _RegisterPageState extends State<RegisterPage> {
     email.dispose();
     phone.dispose();
     password.dispose();
+    vehicleType.dispose();
+    vehicleModel.dispose();
+    plateNumber.dispose();
     super.dispose();
   }
 
@@ -363,7 +426,21 @@ class _RegisterPageState extends State<RegisterPage> {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            TextField(controller: name, decoration: const InputDecoration(labelText: 'Full name')),
+            DropdownButtonFormField<String>(
+              initialValue: role,
+              decoration: const InputDecoration(labelText: 'Account type'),
+              items: const [
+                DropdownMenuItem(value: 'rider', child: Text('Passenger')),
+                DropdownMenuItem(value: 'driver', child: Text('Driver')),
+              ],
+              onChanged: loading
+                  ? null
+                  : (value) => setState(() => role = value ?? 'rider'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+                controller: name,
+                decoration: const InputDecoration(labelText: 'Full name')),
             const SizedBox(height: 12),
             TextField(
               controller: email,
@@ -380,15 +457,38 @@ class _RegisterPageState extends State<RegisterPage> {
             TextField(
               controller: password,
               obscureText: true,
-              decoration: const InputDecoration(labelText: 'Password'),
+              decoration: const InputDecoration(
+                  labelText: 'Password (at least 8 characters)'),
             ),
+            if (role == 'driver') ...[
+              const SizedBox(height: 18),
+              const Text('Vehicle details',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 10),
+              TextField(
+                  controller: vehicleType,
+                  decoration: const InputDecoration(labelText: 'Vehicle type')),
+              const SizedBox(height: 12),
+              TextField(
+                  controller: vehicleModel,
+                  decoration:
+                      const InputDecoration(labelText: 'Make and model')),
+              const SizedBox(height: 12),
+              TextField(
+                  controller: plateNumber,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: const InputDecoration(labelText: 'Plate number')),
+            ],
             const SizedBox(height: 20),
             SizedBox(
               height: 52,
               child: FilledButton(
                 onPressed: loading ? null : register,
                 child: loading
-                    ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2))
                     : const Text('Create account'),
               ),
             ),
@@ -444,7 +544,8 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
-          title: const Text('RideApp', style: TextStyle(fontWeight: FontWeight.w800)),
+          title: const Text('RideApp',
+              style: TextStyle(fontWeight: FontWeight.w800)),
           actions: [
             IconButton(
               onPressed: () => Navigator.push(
@@ -459,7 +560,7 @@ class _HomePageState extends State<HomePage> {
           index: tab,
           children: [
             BookingPage(onBooked: load),
-            HistoryPage(rides: rides, loading: loading),
+            HistoryPage(rides: rides, loading: loading, onRefresh: load),
             ProfilePage(user: user, embedded: true, onLogout: logout),
           ],
         ),
@@ -467,9 +568,18 @@ class _HomePageState extends State<HomePage> {
           selectedIndex: tab,
           onDestinationSelected: (v) => setState(() => tab = v),
           destinations: const [
-            NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Book'),
-            NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long), label: 'Rides'),
-            NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: 'Account'),
+            NavigationDestination(
+                icon: Icon(Icons.home_outlined),
+                selectedIcon: Icon(Icons.home),
+                label: 'Book'),
+            NavigationDestination(
+                icon: Icon(Icons.receipt_long_outlined),
+                selectedIcon: Icon(Icons.receipt_long),
+                label: 'Rides'),
+            NavigationDestination(
+                icon: Icon(Icons.person_outline),
+                selectedIcon: Icon(Icons.person),
+                label: 'Account'),
           ],
         ),
       );
@@ -530,7 +640,8 @@ class _BookingPageState extends State<BookingPage> {
       setState(() {
         estimatedFare = null;
         distanceKm = null;
-        message = 'Final fare will be calculated after the driver completes the ride.';
+        message =
+            'Final fare will be calculated after the driver completes the ride.';
       });
       return;
     }
@@ -560,7 +671,8 @@ class _BookingPageState extends State<BookingPage> {
       );
       final rawFare = data['estimated_fare'] ?? data['fare'];
       setState(() {
-        estimatedFare = rawFare == null ? null : double.tryParse(rawFare.toString());
+        estimatedFare =
+            rawFare == null ? null : double.tryParse(rawFare.toString());
         distanceKm = data['distance_km'] == null
             ? null
             : double.tryParse(data['distance_km'].toString());
@@ -601,7 +713,8 @@ class _BookingPageState extends State<BookingPage> {
         body: {
           'rider_id': user['id'],
           'pickup_location': pickup.text.trim(),
-          'destination': type == RideType.direct ? null : destination.text.trim(),
+          'destination':
+              type == RideType.direct ? null : destination.text.trim(),
           'ride_type': type.name,
           'fare': type == RideType.direct ? null : estimatedFare,
           'distance_km': distanceKm,
@@ -659,7 +772,8 @@ class _BookingPageState extends State<BookingPage> {
     }
   }
 
-  void _msg(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+  void _msg(String s) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 
   @override
   void dispose() {
@@ -722,7 +836,8 @@ class _BookingPageState extends State<BookingPage> {
                             ? const SizedBox(
                                 width: 18,
                                 height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
                               )
                             : const Icon(Icons.my_location),
                       ),
@@ -737,7 +852,8 @@ class _BookingPageState extends State<BookingPage> {
                         color: const Color(0xFFF3F4F6),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const Text('Direct Ride does not require a destination.'),
+                      child: const Text(
+                          'Direct Ride does not require a destination.'),
                     )
                   else
                     TextField(
@@ -780,12 +896,18 @@ class _BookingPageState extends State<BookingPage> {
                     color: type == t ? const Color(0xFF111827) : Colors.white,
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(
-                      color: type == t ? const Color(0xFF111827) : const Color(0xFFE5E7EB),
+                      color: type == t
+                          ? const Color(0xFF111827)
+                          : const Color(0xFFE5E7EB),
                     ),
                   ),
                   child: Row(
                     children: [
-                      Icon(icon(t), color: type == t ? Colors.white : const Color(0xFF111827), size: 30),
+                      Icon(icon(t),
+                          color: type == t
+                              ? Colors.white
+                              : const Color(0xFF111827),
+                          size: 30),
                       const SizedBox(width: 13),
                       Expanded(
                         child: Column(
@@ -795,14 +917,18 @@ class _BookingPageState extends State<BookingPage> {
                               title(t),
                               style: TextStyle(
                                 fontWeight: FontWeight.w800,
-                                color: type == t ? Colors.white : const Color(0xFF111827),
+                                color: type == t
+                                    ? Colors.white
+                                    : const Color(0xFF111827),
                               ),
                             ),
                             const SizedBox(height: 3),
                             Text(
                               subtitle(t),
                               style: TextStyle(
-                                color: type == t ? Colors.white70 : const Color(0xFF6B7280),
+                                color: type == t
+                                    ? Colors.white70
+                                    : const Color(0xFF6B7280),
                                 fontSize: 13,
                               ),
                             ),
@@ -810,8 +936,11 @@ class _BookingPageState extends State<BookingPage> {
                         ),
                       ),
                       Icon(
-                        type == t ? Icons.check_circle : Icons.radio_button_unchecked,
-                        color: type == t ? Colors.white : const Color(0xFF9CA3AF),
+                        type == t
+                            ? Icons.check_circle
+                            : Icons.radio_button_unchecked,
+                        color:
+                            type == t ? Colors.white : const Color(0xFF9CA3AF),
                       ),
                     ],
                   ),
@@ -851,22 +980,28 @@ class _BookingPageState extends State<BookingPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        type == RideType.direct ? 'Final fare' : 'Estimated fare',
-                        style: const TextStyle(color: Color(0xFF6B7280), fontSize: 13),
+                        type == RideType.direct
+                            ? 'Final fare'
+                            : 'Estimated fare',
+                        style: const TextStyle(
+                            color: Color(0xFF6B7280), fontSize: 13),
                       ),
                       const SizedBox(height: 4),
                       Text(
                         estimatedFare == null
                             ? '—'
                             : '\$${estimatedFare!.toStringAsFixed(2)}',
-                        style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w900),
+                        style: const TextStyle(
+                            fontSize: 25, fontWeight: FontWeight.w900),
                       ),
                       if (distanceKm != null)
                         Text('${distanceKm!.toStringAsFixed(2)} km',
-                            style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
+                            style: const TextStyle(
+                                color: Color(0xFF6B7280), fontSize: 12)),
                       if (message != null)
                         Text(message!,
-                            style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
+                            style: const TextStyle(
+                                color: Color(0xFF6B7280), fontSize: 12)),
                     ],
                   ),
                 ),
@@ -882,25 +1017,153 @@ class _BookingPageState extends State<BookingPage> {
                   ? const SizedBox(
                       width: 22,
                       height: 22,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
                     )
-                  : const Text('Request Ride', style: TextStyle(fontWeight: FontWeight.w800)),
+                  : const Text('Request Ride',
+                      style: TextStyle(fontWeight: FontWeight.w800)),
             ),
           ),
         ],
       );
 }
 
-class HistoryPage extends StatelessWidget {
+class HistoryPage extends StatefulWidget {
   final List<Map<String, dynamic>> rides;
   final bool loading;
+  final Future<void> Function()? onRefresh;
 
-  const HistoryPage({super.key, required this.rides, required this.loading});
+  const HistoryPage(
+      {super.key, required this.rides, required this.loading, this.onRefresh});
+
+  @override
+  State<HistoryPage> createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  final Set<int> busyRides = {};
+
+  Future<void> _action(Map<String, dynamic> ride, String action,
+      Future<void> Function() operation) async {
+    final id = ride['id'] as int;
+    setState(() => busyRides.add(id));
+    try {
+      await operation();
+      if (!mounted) return;
+      if (action.isNotEmpty) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(action)));
+      }
+      await widget.onRefresh?.call();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(e.toString().replaceFirst('Exception: ', ''))));
+      }
+    } finally {
+      if (mounted) setState(() => busyRides.remove(id));
+    }
+  }
+
+  Future<String?> _token() => Session.token();
+
+  Future<void> _cancel(Map<String, dynamic> ride) async {
+    final accepted = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+              title: const Text('Cancel this ride?'),
+              content: Text(
+                  'Ride #${ride['id']} has not been assigned to a driver yet.'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(dialogContext, false),
+                    child: const Text('Keep ride')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(dialogContext, true),
+                    child: const Text('Cancel ride')),
+              ],
+            ));
+    if (accepted != true) return;
+    await _action(ride, 'Ride cancelled.', () async {
+      final token = await _token();
+      if (token == null) throw Exception('Please sign in again.');
+      await Api.request('PUT', '/rides/${ride['id']}/cancel', token: token);
+    });
+  }
+
+  Future<void> _pay(Map<String, dynamic> ride) =>
+      _action(ride, 'Cash payment recorded.', () async {
+        final token = await _token();
+        if (token == null) throw Exception('Please sign in again.');
+        await Api.request('POST', '/payments',
+            token: token,
+            body: {'ride_id': ride['id'], 'payment_method': 'cash'});
+      });
+
+  Future<void> _rate(Map<String, dynamic> ride) async {
+    int score = 5;
+    final comment = TextEditingController();
+    final rating = await showDialog<int>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+              builder: (context, setRating) => AlertDialog(
+                title: const Text('Rate your driver'),
+                content: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(
+                          5,
+                          (index) => IconButton(
+                                onPressed: () =>
+                                    setRating(() => score = index + 1),
+                                color: const Color(0xFFF59E0B),
+                                icon: Icon(index < score
+                                    ? Icons.star
+                                    : Icons.star_border),
+                              ))),
+                  TextField(
+                      controller: comment,
+                      maxLength: 500,
+                      decoration: const InputDecoration(
+                          labelText: 'Comment (optional)')),
+                ]),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(dialogContext),
+                      child: const Text('Cancel')),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(dialogContext, score),
+                      child: const Text('Submit rating')),
+                ],
+              ),
+            ));
+    if (rating != null) {
+      await _action(ride, 'Thanks for your feedback.', () async {
+        final token = await _token();
+        if (token == null) throw Exception('Please sign in again.');
+        await Api.request('POST', '/ratings', token: token, body: {
+          'ride_id': ride['id'],
+          'score': rating,
+          'comment': comment.text.trim(),
+        });
+      });
+    }
+    comment.dispose();
+  }
+
+  Future<void> _track(Map<String, dynamic> ride) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _TrackRideSheet(rideId: ride['id'] as int),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (loading) return const Center(child: CircularProgressIndicator());
-    if (rides.isEmpty) {
+    if (widget.loading) return const Center(child: CircularProgressIndicator());
+    if (widget.rides.isEmpty) {
       return const Center(
         child: Text('No rides yet',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
@@ -908,12 +1171,15 @@ class HistoryPage extends StatelessWidget {
     }
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 25),
-      itemCount: rides.length,
+      itemCount: widget.rides.length,
       separatorBuilder: (_, __) => const SizedBox(height: 10),
       itemBuilder: (_, i) {
-        final ride = rides[i];
+        final ride = widget.rides[i];
         final fare = double.tryParse((ride['fare'] ?? '').toString());
-        final direct = ride['ride_type']?.toString() == 'direct';
+        final direct =
+            ride['ride_type']?.toString().toLowerCase() == 'direct ride';
+        final status = ride['status']?.toString() ?? 'requested';
+        final busy = busyRides.contains(ride['id']);
         return Card(
           elevation: 0,
           shape: RoundedRectangleBorder(
@@ -930,12 +1196,14 @@ class HistoryPage extends StatelessWidget {
                     Text('Ride #${ride['id'] ?? '-'}',
                         style: const TextStyle(fontWeight: FontWeight.w800)),
                     const Spacer(),
-                    _StatusPill(status: (ride['status'] ?? 'requested').toString()),
+                    _StatusPill(
+                        status: (ride['status'] ?? 'requested').toString()),
                   ],
                 ),
                 const SizedBox(height: 10),
                 Text('Pickup: ${ride['pickup_location'] ?? '-'}'),
-                if (!direct)
+                if (!direct &&
+                    (ride['destination'] ?? '').toString().isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 5),
                     child: Text('Destination: ${ride['destination'] ?? '-'}'),
@@ -944,22 +1212,164 @@ class HistoryPage extends StatelessWidget {
                 Row(
                   children: [
                     Text(
-                      direct && fare == null ? 'Final fare pending' : '\$${(fare ?? 0).toStringAsFixed(2)}',
-                      style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17),
+                      fare == null
+                          ? (direct ? 'Final fare pending' : 'Fare pending')
+                          : '\$${fare.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w900, fontSize: 17),
                     ),
                     const Spacer(),
                     Text(
                       (ride['driver_name'] ?? 'Waiting for driver').toString(),
-                      style: const TextStyle(color: Color(0xFF6B7280), fontSize: 13),
+                      style: const TextStyle(
+                          color: Color(0xFF6B7280), fontSize: 13),
                     ),
                   ],
                 ),
+                if (['accepted', 'ongoing'].contains(status)) ...[
+                  const SizedBox(height: 12),
+                  SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () => _track(ride),
+                        icon: const Icon(Icons.location_searching),
+                        label: const Text('Track driver'),
+                      )),
+                ],
+                if (status == 'requested') ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                      width: double.infinity,
+                      child: TextButton.icon(
+                        onPressed: busy ? null : () => _cancel(ride),
+                        icon: const Icon(Icons.close),
+                        label: const Text('Cancel request'),
+                      )),
+                ],
+                if (status == 'completed' && fare != null) ...[
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    if (ride['paid'] != true)
+                      Expanded(
+                          child: FilledButton.icon(
+                        onPressed: busy ? null : () => _pay(ride),
+                        icon: busy
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.payments_outlined),
+                        label: const Text('Pay cash'),
+                      )),
+                    if (ride['driver_id'] != null && ride['rated'] != true)
+                      Expanded(
+                          child: TextButton.icon(
+                        onPressed: busy ? null : () => _rate(ride),
+                        icon: const Icon(Icons.star_outline),
+                        label: const Text('Rate driver'),
+                      )),
+                  ]),
+                  if (ride['paid'] == true)
+                    const Text('Paid',
+                        style: TextStyle(
+                            color: Color(0xFF166534),
+                            fontWeight: FontWeight.w700)),
+                ],
               ],
             ),
           ),
         );
       },
     );
+  }
+}
+
+class _TrackRideSheet extends StatefulWidget {
+  final int rideId;
+  const _TrackRideSheet({required this.rideId});
+
+  @override
+  State<_TrackRideSheet> createState() => _TrackRideSheetState();
+}
+
+class _TrackRideSheetState extends State<_TrackRideSheet> {
+  Map<String, dynamic>? tracking;
+  String? error;
+  Timer? timer;
+
+  @override
+  void initState() {
+    super.initState();
+    refresh();
+    timer = Timer.periodic(const Duration(seconds: 8), (_) => refresh());
+  }
+
+  Future<void> refresh() async {
+    try {
+      final token = await Session.token();
+      if (token == null) return;
+      final data = await Api.request('GET', '/rides/${widget.rideId}/track',
+          token: token);
+      if (!mounted) return;
+      setState(() {
+        tracking = Map<String, dynamic>.from(data as Map);
+        error = null;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => error = e.toString().replaceFirst('Exception: ', ''));
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final location = tracking?['location'];
+    return SafeArea(
+        child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Ride #${widget.rideId}',
+                    style: const TextStyle(
+                        fontSize: 21, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 8),
+                Text('Status: ${tracking?['status'] ?? 'loading'}',
+                    style: const TextStyle(color: Color(0xFF6B7280))),
+                const SizedBox(height: 12),
+                if (location is Map) ...[
+                  const Text('Driver location',
+                      style: TextStyle(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 4),
+                  Text('${location['latitude']}, ${location['longitude']}'),
+                  Text('Updated ${location['updated_at'] ?? 'just now'}',
+                      style: const TextStyle(color: Color(0xFF6B7280))),
+                ] else
+                  const Text(
+                      'Waiting for the driver to share their live location.'),
+                if (error != null)
+                  Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(error!,
+                          style: const TextStyle(color: Colors.red))),
+                const SizedBox(height: 12),
+                Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                        onPressed: refresh,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Refresh now'))),
+              ],
+            )));
   }
 }
 
@@ -998,176 +1408,210 @@ class _StatusPill extends StatelessWidget {
   }
 }
 
-class ProfilePage extends StatelessWidget {
+class ProfilePage extends StatefulWidget {
   final Map<String, dynamic> user;
   final bool embedded;
   final Future<void> Function()? onLogout;
 
-  const ProfilePage({
-    super.key,
-    required this.user,
-    this.embedded = false,
-    this.onLogout,
-  });
+  const ProfilePage(
+      {super.key, required this.user, this.embedded = false, this.onLogout});
 
-  Future<void> _connectChatGPT(BuildContext context) async {
-    final accountCtrl = TextEditingController();
-    final apiKeyCtrl = TextEditingController();
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
 
-    final existing = await Session.chatGPTAccount();
-    if (!context.mounted) {
-      accountCtrl.dispose();
-      apiKeyCtrl.dispose();
-      return;
-    }
+class _ProfilePageState extends State<ProfilePage> {
+  late Future<Map<String, dynamic>> profile = _loadProfile();
 
-    if (existing != null) {
-      accountCtrl.text = existing['account'] ?? '';
-      apiKeyCtrl.text = existing['apiKey'] ?? '';
-    }
+  Future<Map<String, dynamic>> _loadProfile() async {
+    final token = await Session.token();
+    if (token == null) return widget.user;
+    final result = await Api.request('GET', '/profile', token: token);
+    return Map<String, dynamic>.from(result as Map);
+  }
 
-    final result = await showDialog<bool>(
+  Future<void> _editProfile(Map<String, dynamic> current) async {
+    final name = TextEditingController(text: current['name']?.toString() ?? '');
+    final phone =
+        TextEditingController(text: current['phone']?.toString() ?? '');
+    final formKey = GlobalKey<FormState>();
+    final save = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Connect ChatGPT account'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: accountCtrl,
-                decoration: const InputDecoration(labelText: 'ChatGPT account email'),
-              ),
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Edit your profile'),
+        content: Form(
+            key: formKey,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextFormField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Full name'),
+                  validator: (value) => value == null || value.trim().length < 2
+                      ? 'Enter your name'
+                      : null),
               const SizedBox(height: 12),
-              TextField(
-                controller: apiKeyCtrl,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'API key'),
-              ),
-            ],
-          ),
-        ),
+              TextFormField(
+                  controller: phone,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(labelText: 'Phone number')),
+            ])),
         actions: [
           TextButton(
-            onPressed: () async {
-              final account = accountCtrl.text.trim();
-              final apiKey = apiKeyCtrl.text.trim();
-
-              if (account.isEmpty || apiKey.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Enter your ChatGPT account and API key.')),
-                );
-                return;
-              }
-
-              await Session.saveChatGPTAccount(account, apiKey);
-              if (context.mounted) {
-                Navigator.of(context).pop(true);
-              }
-            },
-            child: const Text('Connect'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () {
+                if (formKey.currentState!.validate()) {
+                  Navigator.pop(dialogContext, true);
+                }
+              },
+              child: const Text('Save changes')),
         ],
       ),
     );
-
-    if (result == true && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ChatGPT account connected.')),
-      );
+    if (save == true && mounted) {
+      final token = await Session.token();
+      if (token != null) {
+        try {
+          final updated = await Api.request('PUT', '/profile',
+              token: token,
+              body: {'name': name.text.trim(), 'phone': phone.text.trim()});
+          await Session.save(Map<String, dynamic>.from(updated as Map), token);
+          if (mounted) setState(() => profile = _loadProfile());
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(e.toString().replaceFirst('Exception: ', ''))));
+          }
+        }
+      }
     }
+    name.dispose();
+    phone.dispose();
+  }
+
+  Future<List<Map<String, dynamic>>> _loadNotifications() async {
+    final token = await Session.token();
+    if (token == null) return [];
+    final data = await Api.request('GET', '/my-notifications', token: token);
+    return ((data as Map)['notifications'] as List? ?? [])
+        .map((item) => Map<String, dynamic>.from(item))
+        .take(5)
+        .toList();
   }
 
   @override
   Widget build(BuildContext context) {
-    final body = FutureBuilder<Map<String, String>?>(
-      future: Session.chatGPTAccount(),
+    final body = FutureBuilder<Map<String, dynamic>>(
+      future: profile,
       builder: (context, snapshot) {
-        final connected = snapshot.data != null;
-        final accountName = snapshot.data?['account'] ?? 'Not connected';
-
+        final user = snapshot.data ?? widget.user;
+        final displayName = user['name']?.toString() ?? 'Passenger';
         return ListView(
           padding: const EdgeInsets.all(18),
           children: [
-            Center(
-              child: CircleAvatar(
-                radius: 35,
-                child: Text(
-                  (user['name']?.toString().isNotEmpty ?? false)
-                      ? user['name'].toString().substring(0, 1).toUpperCase()
-                      : 'R',
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Center(
-              child: Text(user['name']?.toString() ?? 'Rider',
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-            ),
-            const SizedBox(height: 18),
-            _InfoTile('Email', user['email']?.toString() ?? '-'),
-            _InfoTile('Phone', user['phone']?.toString() ?? '-'),
-            _InfoTile('Role', user['role']?.toString() ?? 'rider'),
-            const SizedBox(height: 8),
-            SizedBox(
-              height: 50,
-              child: OutlinedButton.icon(
-                onPressed: () => _connectChatGPT(context),
-                icon: Icon(connected ? Icons.check_circle : Icons.smart_toy_outlined),
-                label: Text(connected ? 'ChatGPT connected' : 'Connect to ChatGPT'),
-              ),
-            ),
-            if (connected) ...[
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(12),
+            Container(
+                padding: const EdgeInsets.all(22),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFE5E7EB),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.account_circle_outlined, size: 18),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(accountName)),
-                    TextButton(
-                      onPressed: () async {
-                        await Session.clearChatGPTAccount();
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('ChatGPT account disconnected.')),
-                          );
-                        }
-                      },
-                      child: const Text('Disconnect'),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-            if (onLogout != null) ...[
-              const SizedBox(height: 12),
+                    color: const Color(0xFF111827),
+                    borderRadius: BorderRadius.circular(22)),
+                child: Row(children: [
+                  CircleAvatar(
+                      radius: 30,
+                      backgroundColor: Colors.white,
+                      foregroundColor: const Color(0xFF111827),
+                      child: Text(
+                          displayName.isEmpty
+                              ? 'R'
+                              : displayName[0].toUpperCase(),
+                          style: const TextStyle(
+                              fontSize: 22, fontWeight: FontWeight.w900))),
+                  const SizedBox(width: 16),
+                  Expanded(
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                        Text(displayName,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 3),
+                        Text(user['email']?.toString() ?? '',
+                            style: const TextStyle(color: Colors.white70)),
+                      ])),
+                  IconButton(
+                      tooltip: 'Edit profile',
+                      onPressed:
+                          snapshot.connectionState == ConnectionState.waiting
+                              ? null
+                              : () => _editProfile(user),
+                      icon:
+                          const Icon(Icons.edit_outlined, color: Colors.white)),
+                ])),
+            const SizedBox(height: 18),
+            _InfoTile(
+                'Phone',
+                user['phone']?.toString().isNotEmpty == true
+                    ? user['phone'].toString()
+                    : 'Add a phone number'),
+            _InfoTile('Account type',
+                user['role']?.toString() == 'driver' ? 'Driver' : 'Passenger'),
+            const SizedBox(height: 16),
+            const Text('Recent notifications',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            FutureBuilder<List<Map<String, dynamic>>>(
+                future: _loadNotifications(),
+                builder: (context, notifications) {
+                  if (notifications.connectionState ==
+                      ConnectionState.waiting) {
+                    return const Padding(
+                        padding: EdgeInsets.all(20),
+                        child: Center(child: CircularProgressIndicator()));
+                  }
+                  if (notifications.hasError) {
+                    return const _InfoTile(
+                        'Notifications', 'Unable to load right now');
+                  }
+                  if (notifications.data!.isEmpty) {
+                    return const _InfoTile('You are all caught up',
+                        'Ride updates will appear here');
+                  }
+                  return Column(
+                      children: notifications.data!
+                          .map((item) => Card(
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  side: const BorderSide(
+                                      color: Color(0xFFE5E7EB))),
+                              child: ListTile(
+                                  leading: const Icon(Icons.notifications_none),
+                                  title: Text(
+                                      item['title']?.toString() ??
+                                          'Ride update',
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w700)),
+                                  subtitle:
+                                      Text(item['message']?.toString() ?? ''))))
+                          .toList());
+                }),
+            if (widget.onLogout != null) ...[
+              const SizedBox(height: 16),
               SizedBox(
-                height: 50,
-                child: OutlinedButton.icon(
-                  onPressed: onLogout,
-                  icon: const Icon(Icons.logout),
-                  label: const Text('Log out'),
-                ),
-              ),
+                  height: 50,
+                  child: OutlinedButton.icon(
+                      onPressed: widget.onLogout,
+                      icon: const Icon(Icons.logout),
+                      label: const Text('Log out'))),
             ],
           ],
         );
       },
     );
-
-    return embedded ? body : Scaffold(appBar: AppBar(title: const Text('Account')), body: body);
+    return widget.embedded
+        ? body
+        : Scaffold(appBar: AppBar(title: const Text('Account')), body: body);
   }
 }
 

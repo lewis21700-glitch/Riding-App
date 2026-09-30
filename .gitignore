@@ -1,15 +1,22 @@
 # Dart / Flutter generated files
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
 **/.dart_tool/
 **/.flutter-plugins
 **/.flutter-plugins-dependencies
 **/.packages
 **/build/
+**/.gradle/
 **/coverage/
 **/GeneratedPluginRegistrant.java
 
 # Machine-specific IDE and Android SDK settings
 **/.idea/workspace.xml
 **/android/local.properties
+**/.env
+**/.env.*
+!**/.env.example
 
 # Keep the separate nested repository out of this repository's index.
 /Riding-App/
