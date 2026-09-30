@@ -1,5 +1,5 @@
 name: mobile
-description: "RideApp Cambodia - Sprint 3 mobile application"
+description: "RideApp Cambodia passenger and driver mobile application"
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -12,7 +12,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   http: ^1.2.2
   shared_preferences: ^2.3.5
-  geolocator: ^13.0.2
+  geolocator: ^14.1.1
 
 dev_dependencies:
   flutter_test:

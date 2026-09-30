@@ -4,6 +4,7 @@ SQLAlchemy==2.0.48
 PyMySQL==1.1.2
 PyJWT==2.12.1
 pwdlib[argon2]==0.3.0
+bcrypt==5.0.0
 httpx==0.28.1
 email-validator==2.3.0
 python-dotenv==1.2.1

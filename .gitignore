@@ -8,6 +8,12 @@
 **/.packages
 **/build/
 **/.gradle/
+*.hprof
+/.tools/
+/.pub-cache/
+/.tool-data/
+/.tool-local/
+/.gradle-home/
 **/coverage/
 **/GeneratedPluginRegistrant.java
 

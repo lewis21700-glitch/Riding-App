@@ -22,11 +22,11 @@ This service uses the existing MySQL database and preserves the `/api` response 
    ```
 
 5. Create the first admin account with `python scripts/create_admin.py`. The password is entered interactively and saved as an Argon2 hash.
-6. Open `../admin` in another terminal and run `npm install` then `npm run dev`. The Flutter app uses `10.0.2.2:3000` from the Android emulator.
+6. Open `../admin` in another terminal, copy `.env.example` to `.env`, set `VITE_API_URL` to the FastAPI server origin (for example `http://localhost:3000`), then run `npm install` and `npm run dev`. The Flutter app uses `10.0.2.2:3000` from the Android emulator. For a physical Android device, pass `--dart-define=API_BASE_URL=http://YOUR_COMPUTER_LAN_IP:3000/api` and allow that debug-only HTTP connection on your private network.
 
 ## Compatibility and security
 
-Existing legacy plaintext and bcrypt passwords are accepted at login once and upgraded to Argon2. New registrations and password changes always use Argon2. Role claims are looked up against MySQL on each authenticated request so deleted or changed accounts lose access immediately. Database/schema failures stop application startup rather than leaving a partially working API.
+Existing legacy plaintext and bcrypt passwords are accepted at login once and upgraded to Argon2. New registrations and password changes always use Argon2. Role claims are looked up against MySQL on each authenticated request so deleted or changed accounts lose access immediately. Set `APP_ENV=production` and provide a private `JWT_SECRET` of at least 32 characters before deployment; startup rejects the development secret and wildcard CORS in production. Database/schema failures stop application startup rather than leaving a partially working API.
 
 The local demo estimates road distance as 1.25 times the straight-line distance. It accepts explicit distances and coordinate pairs; named places are resolved with OpenStreetMap Nominatim. Configure a descriptive `GEOCODER_USER_AGENT` before using that service beyond local testing. Cash payments are recorded only after ride completion. Card payments and push delivery need provider credentials and are intentionally reported as unconfigured until those accounts are supplied; the API can store device tokens for a future Firebase integration.
 

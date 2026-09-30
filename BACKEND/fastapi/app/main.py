@@ -19,12 +19,14 @@ from pydantic import BaseModel, EmailStr, Field
 from fastapi.exceptions import RequestValidationError
 from pwdlib import PasswordHash
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import Engine
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("rideapp")
 load_dotenv()
 
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "mysql+pymysql://root:1234@127.0.0.1:3306/ride_app?charset=utf8mb4",
@@ -130,6 +132,7 @@ def ensure_schema() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_security_configuration()
     ensure_schema()
     logger.info("RideApp database schema ready")
     yield
@@ -161,7 +164,7 @@ class RegisterBody(BaseModel):
 
 class LoginBody(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=128)
 
 
 class ProfileBody(BaseModel):
@@ -225,6 +228,14 @@ class RatingBody(BaseModel):
 
 def fail(code: int, message: str) -> None:
     raise HTTPException(status_code=code, detail=message)
+
+
+def validate_security_configuration() -> None:
+    if APP_ENV in ("production", "prod"):
+        if len(JWT_SECRET) < 32 or JWT_SECRET == "local-development-only-change-before-deploy-32chars":
+            raise RuntimeError("Production requires a private JWT_SECRET with at least 32 characters")
+        if "*" in CORS_ORIGINS:
+            raise RuntimeError("Production CORS_ORIGINS cannot contain a wildcard")
 
 
 def jwt_subject(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -420,6 +431,9 @@ def login(body: LoginBody):
             valid = bcrypt.checkpw(body.password.encode(), stored.encode())
         except Exception:
             valid = False
+        if valid:
+            execute("UPDATE users SET password=:password WHERE id=:id",
+                    {"password": password_hash.hash(body.password), "id": user["id"]})
     else:
         # One-time compatibility with legacy accounts from the original demo.
         valid = hmac.compare_digest(stored, body.password)
@@ -534,6 +548,13 @@ def update_availability(driver_id: int, body: AvailabilityBody, user=Depends(jwt
     if user["role"] == "driver" and driver_id != user["id"]:
         fail(403, "You can only change your own availability")
     value = {"online": "available", "busy": "on_ride"}.get(body.availability, body.availability)
+    if user["role"] == "driver" and value not in ("offline", "available"):
+        fail(422, "Drivers can only switch between online and offline")
+    if user["role"] == "driver" and rows(
+        "SELECT id FROM rides WHERE driver_id=:id AND status IN ('accepted','ongoing') LIMIT 1",
+        {"id": driver_id},
+    ):
+        fail(409, "Finish or cancel your active ride before changing availability")
     if value == "available" and not rows(
         "SELECT id FROM vehicles WHERE driver_id=:id LIMIT 1", {"id": driver_id}
     ):
@@ -768,12 +789,12 @@ def cancel_ride(ride_id: int, rider=Depends(require_role("rider"))):
 
 
 @app.post("/api/driver-location")
-def update_driver_location(body: LocationBody, ride_id: int | None = Query(default=None),
+def update_driver_location(body: LocationBody, ride_id: int = Query(gt=0),
                            driver=Depends(require_role("driver"))):
     if driver.get("availability") not in ("on_ride", "busy"):
         fail(409, "Location sharing is available during an active ride")
-    if ride_id is not None and not rows("SELECT id FROM rides WHERE id=:ride AND driver_id=:driver "
-                                        "AND status='ongoing'", {"ride": ride_id, "driver": driver["id"]}):
+    if not rows("SELECT id FROM rides WHERE id=:ride AND driver_id=:driver "
+                "AND status='ongoing'", {"ride": ride_id, "driver": driver["id"]}):
         fail(403, "The active ride does not belong to you")
     save_driver_location(driver["id"], ride_id, body)
     return {"message": "Location updated"}
@@ -792,7 +813,7 @@ def track_ride(ride_id: int, user=Depends(jwt_subject)):
     if user["role"] not in ("rider", "driver", "admin"):
         fail(403, "Access denied")
     location = rows("SELECT latitude,longitude,heading,updated_at FROM driver_locations "
-                    "WHERE driver_id=:driver AND (ride_id=:ride OR ride_id IS NULL)",
+                    "WHERE driver_id=:driver AND ride_id=:ride",
                     {"driver": ride["driver_id"], "ride": ride_id}) if ride["driver_id"] else []
     return {"ride_id": ride_id, "status": ride["status"],
             "location": location[0] if location else None}
@@ -837,9 +858,12 @@ def create_payment(body: PaymentBody, rider=Depends(require_role("rider"))):
         fail(501, "Card payments need a payment-provider account and are not configured")
     if rows("SELECT id FROM payments WHERE ride_id=:ride", {"ride": body.ride_id}):
         fail(409, "This ride has already been paid")
-    _, payment_id = execute("INSERT INTO payments(ride_id,amount,payment_method,status) "
-                            "VALUES(:ride,:amount,'cash','paid')",
-                            {"ride": body.ride_id, "amount": ride["fare"]})
+    try:
+        _, payment_id = execute("INSERT INTO payments(ride_id,amount,payment_method,status) "
+                                "VALUES(:ride,:amount,'cash','paid')",
+                                {"ride": body.ride_id, "amount": ride["fare"]})
+    except IntegrityError:
+        fail(409, "This ride has already been paid")
     return {"message": "Cash payment recorded", "payment_id": payment_id, "amount": ride["fare"]}
 
 
@@ -855,10 +879,13 @@ def rate_ride(body: RatingBody, user=Depends(jwt_subject)):
         ratee = ride["rider_id"]
     else:
         fail(403, "You were not part of this ride")
-    _, rating_id = execute("INSERT INTO ratings(ride_id,rater_id,ratee_id,score,comment) "
-                           "VALUES(:ride,:rater,:ratee,:score,:comment)",
-                           {"ride": body.ride_id, "rater": user["id"], "ratee": ratee,
-                            "score": body.score, "comment": body.comment})
+    try:
+        _, rating_id = execute("INSERT INTO ratings(ride_id,rater_id,ratee_id,score,comment) "
+                               "VALUES(:ride,:rater,:ratee,:score,:comment)",
+                               {"ride": body.ride_id, "rater": user["id"], "ratee": ratee,
+                                "score": body.score, "comment": body.comment})
+    except IntegrityError:
+        fail(409, "You have already rated this ride")
     return {"id": rating_id, "message": "Rating saved"}
 
 
@@ -874,9 +901,14 @@ def register_push_token(token: str = Query(min_length=20, max_length=512),
                         platform: str = Query(default="android"), user=Depends(jwt_subject)):
     if platform not in ("android", "ios"):
         fail(422, "Platform must be android or ios")
-    execute("INSERT INTO push_tokens(user_id,token,platform) VALUES(:user,:token,:platform) "
-            "ON DUPLICATE KEY UPDATE user_id=:user,platform=:platform",
-            {"user": user["id"], "token": token, "platform": platform})
+    statement = (
+        "INSERT INTO push_tokens(user_id,token,platform) VALUES(:user,:token,:platform) "
+        "ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id,platform=excluded.platform"
+        if engine.dialect.name == "sqlite"
+        else "INSERT INTO push_tokens(user_id,token,platform) VALUES(:user,:token,:platform) "
+        "ON DUPLICATE KEY UPDATE user_id=VALUES(user_id),platform=VALUES(platform)"
+    )
+    execute(statement, {"user": user["id"], "token": token, "platform": platform})
     return {"message": "Push token registered"}
 
 

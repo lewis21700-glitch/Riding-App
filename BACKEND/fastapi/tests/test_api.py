@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import itertools
 
+import bcrypt
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
@@ -108,6 +110,29 @@ def test_authentication_role_checks_and_password_hash(client):
     assert client.post("/api/login", json={"email": user["email"], "password": "incorrect"}).status_code == 401
 
 
+def test_production_rejects_weak_jwt_secret(monkeypatch):
+    monkeypatch.setattr(api, "APP_ENV", "production")
+    monkeypatch.setattr(api, "JWT_SECRET", "local-development-only-change-before-deploy-32chars")
+    with pytest.raises(RuntimeError, match="private JWT_SECRET"):
+        api.validate_security_configuration()
+
+
+def test_bcrypt_legacy_password_is_upgraded_on_successful_login(client):
+    password = b"legacy-password-123"
+    _, user_id = api.execute(
+        "INSERT INTO users(name,email,phone,password,role,availability) "
+        "VALUES(:name,:email,'',:password,'rider',NULL)",
+        {"name": "Legacy Rider", "email": "legacy-bcrypt@example.com",
+         "password": bcrypt.hashpw(password, bcrypt.gensalt()).decode()},
+    )
+    result = client.post("/api/login", json={
+        "email": "legacy-bcrypt@example.com", "password": password.decode()
+    })
+    assert result.status_code == 200
+    migrated = api.rows("SELECT password FROM users WHERE id=:id", {"id": user_id})[0]["password"]
+    assert migrated.startswith("$argon2")
+
+
 def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     rider, rider_token = register(client, "rider", "passenger")
     driver, driver_token = register(client, "driver", "driver")
@@ -144,8 +169,14 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert any(ride["id"] == ride_id for ride in offers)
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,
                       json={"status": "accepted"}).status_code == 200
+    assert client.put(f"/api/drivers/{driver['id']}/availability", headers=driver_auth,
+                      json={"availability": "offline"}).status_code == 409
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,
                       json={"status": "ongoing"}).status_code == 200
+    assert client.post("/api/driver-location", headers=driver_auth,
+                       json={"latitude": 11.56, "longitude": 104.92}).status_code == 422
+    assert client.post("/api/driver-location?ride_id=9999", headers=driver_auth,
+                       json={"latitude": 11.56, "longitude": 104.92}).status_code == 403
     assert client.post(f"/api/driver-location?ride_id={ride_id}", headers=driver_auth,
                        json={"latitude": 11.56, "longitude": 104.92}).status_code == 200
     tracking = client.get(f"/api/rides/{ride_id}/track", headers=rider_auth)
@@ -154,8 +185,23 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
                       json={"status": "completed"}).status_code == 200
     assert client.post("/api/payments", headers=rider_auth,
                        json={"ride_id": ride_id, "payment_method": "cash"}).status_code == 201
+    assert client.post("/api/payments", headers=rider_auth,
+                       json={"ride_id": ride_id, "payment_method": "cash"}).status_code == 409
     assert client.post("/api/ratings", headers=rider_auth,
                        json={"ride_id": ride_id, "score": 5, "comment": "Great ride"}).status_code == 201
+    assert client.post("/api/ratings", headers=rider_auth,
+                       json={"ride_id": ride_id, "score": 5}).status_code == 409
+
+
+def test_push_tokens_upsert_across_accounts(client):
+    _, rider_token = register(client, "rider", "token-owner")
+    _, driver_token = register(client, "driver", "token-owner-change")
+    token = "device-registration-token-00000001"
+    assert client.post(f"/api/push-tokens?token={token}", headers=auth(rider_token)).status_code == 201
+    assert client.post(f"/api/push-tokens?token={token}&platform=android",
+                       headers=auth(driver_token)).status_code == 201
+    assert api.rows("SELECT COUNT(*) AS count FROM push_tokens WHERE token=:token",
+                    {"token": token})[0]["count"] == 1
 
 
 def test_direct_ride_needs_driver_set_fare_and_rejects_invalid_transition(client):

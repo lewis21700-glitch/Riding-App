@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const API = "http://localhost:3000";
+const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
 const emptyUser = { name: "", email: "", phone: "", password: "", role: "rider" };
 const emptyDriver = { name: "", email: "", phone: "", password: "", availability: "offline" };
