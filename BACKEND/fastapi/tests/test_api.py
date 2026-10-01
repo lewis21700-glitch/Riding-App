@@ -169,6 +169,19 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert any(ride["id"] == ride_id for ride in offers)
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,
                       json={"status": "accepted"}).status_code == 200
+    second_booking = client.post("/api/rides", headers=rider_auth, json={
+        "pickup_location": "Phnom Penh Riverside",
+        "destination": "Central Market",
+        "ride_type": "tukTuk",
+        "distance_km": 4,
+    })
+    assert second_booking.status_code == 201
+    second_ride_id = second_booking.json()["ride_id"]
+    assert client.put(f"/api/driver-rides/{second_ride_id}", headers=driver_auth,
+                      json={"status": "accepted"}).status_code == 409
+    second_ride = api.rows("SELECT driver_id,status FROM rides WHERE id=:id",
+                           {"id": second_ride_id})[0]
+    assert second_ride["driver_id"] is None and second_ride["status"] == "requested"
     assert client.put(f"/api/drivers/{driver['id']}/availability", headers=driver_auth,
                       json={"availability": "offline"}).status_code == 409
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,

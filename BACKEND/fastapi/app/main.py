@@ -743,11 +743,23 @@ def driver_ride_action(ride_id: int, body: DriverRideAction, driver=Depends(requ
     if body.status == "accepted":
         if driver.get("availability") != "available":
             fail(409, "Go online before accepting a ride")
-        count, _ = execute("UPDATE rides SET driver_id=:driver,status='accepted' "
-                           "WHERE id=:ride AND status='requested' AND driver_id IS NULL",
-                           {"ride": ride_id, "driver": driver["id"]})
-        if not count:
-            fail(409, "This ride has already been accepted")
+        # Reserve the driver and claim the ride in one transaction so parallel
+        # accept requests cannot assign two rides to the same driver.
+        with engine.begin() as conn:
+            available = conn.execute(
+                text("UPDATE users SET availability='on_ride' "
+                     "WHERE id=:driver AND role='driver' AND availability='available'"),
+                {"driver": driver["id"]},
+            )
+            if not available.rowcount:
+                fail(409, "You are no longer available to accept a ride")
+            claimed = conn.execute(
+                text("UPDATE rides SET driver_id=:driver,status='accepted' "
+                     "WHERE id=:ride AND status='requested' AND driver_id IS NULL"),
+                {"ride": ride_id, "driver": driver["id"]},
+            )
+            if not claimed.rowcount:
+                fail(409, "This ride has already been accepted")
         set_ride_offer(ride_id, driver["id"], "accepted")
     else:
         if ride["driver_id"] != driver["id"]:
@@ -769,8 +781,6 @@ def driver_ride_action(ride_id: int, body: DriverRideAction, driver=Depends(requ
         if body.status in ("completed", "cancelled"):
             execute("UPDATE users SET availability='available' WHERE id=:id AND availability='on_ride'",
                     {"id": driver["id"]})
-    if body.status == "accepted":
-        execute("UPDATE users SET availability='on_ride' WHERE id=:id", {"id": driver["id"]})
     event(ride_id, driver["id"], body.status)
     updated = rows("SELECT status,fare FROM rides WHERE id=:id", {"id": ride_id})[0]
     notify(ride["rider_id"], "Ride updated", f"Ride #{ride_id} is now {updated['status']}.", "ride")
