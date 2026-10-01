@@ -182,6 +182,16 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     second_ride = api.rows("SELECT driver_id,status FROM rides WHERE id=:id",
                            {"id": second_ride_id})[0]
     assert second_ride["driver_id"] is None and second_ride["status"] == "requested"
+    other_driver, other_token = register(client, "driver", "rollback-driver")
+    other_auth = auth(other_token)
+    assert client.post("/api/my-vehicle", headers=other_auth, json={
+        "vehicle_type": "Car", "vehicle_model": "Rollback test car", "plate_number": "TEST-003"
+    }).status_code == 201
+    assert client.put(f"/api/drivers/{other_driver['id']}/availability", headers=other_auth,
+                      json={"availability": "online"}).status_code == 200
+    assert client.put(f"/api/driver-rides/{ride_id}", headers=other_auth,
+                      json={"status": "accepted"}).status_code == 409
+    assert client.get("/api/profile", headers=other_auth).json()["availability"] == "available"
     assert client.put(f"/api/drivers/{driver['id']}/availability", headers=driver_auth,
                       json={"availability": "offline"}).status_code == 409
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,
