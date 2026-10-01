@@ -1180,6 +1180,21 @@ class _HistoryPageState extends State<HistoryPage> {
             body: {'ride_id': ride['id'], 'payment_method': 'cash'});
       });
 
+  Future<void> _showReceipt(Map<String, dynamic> ride) =>
+      _action(ride, '', () async {
+        final token = await _token();
+        if (token == null) throw Exception('Please sign in again.');
+        final receipt = await Api.request('GET', '/rides/${ride['id']}/receipt',
+            token: token);
+        if (!mounted) return;
+        await showModalBottomSheet<void>(
+          context: context,
+          showDragHandle: true,
+          builder: (_) =>
+              _ReceiptSheet(receipt: Map<String, dynamic>.from(receipt as Map)),
+        );
+      });
+
   Future<void> _rate(Map<String, dynamic> ride) async {
     int score = 5;
     final comment = TextEditingController();
@@ -1329,7 +1344,7 @@ class _HistoryPageState extends State<HistoryPage> {
                 if (status == 'completed' && fare != null) ...[
                   const SizedBox(height: 10),
                   Row(children: [
-                    if (ride['paid'] != true)
+                    if (!_asBool(ride['paid']))
                       Expanded(
                           child: FilledButton.icon(
                         onPressed: busy ? null : () => _pay(ride),
@@ -1342,7 +1357,7 @@ class _HistoryPageState extends State<HistoryPage> {
                             : const Icon(Icons.payments_outlined),
                         label: const Text('Pay cash'),
                       )),
-                    if (ride['driver_id'] != null && ride['rated'] != true)
+                    if (ride['driver_id'] != null && !_asBool(ride['rated']))
                       Expanded(
                           child: TextButton.icon(
                         onPressed: busy ? null : () => _rate(ride),
@@ -1350,11 +1365,18 @@ class _HistoryPageState extends State<HistoryPage> {
                         label: const Text('Rate driver'),
                       )),
                   ]),
-                  if (ride['paid'] == true)
-                    const Text('Paid',
-                        style: TextStyle(
-                            color: Color(0xFF166534),
-                            fontWeight: FontWeight.w700)),
+                  if (_asBool(ride['paid']))
+                    Row(children: [
+                      const Expanded(
+                          child: Text('Paid',
+                              style: TextStyle(
+                                  color: Color(0xFF166534),
+                                  fontWeight: FontWeight.w700))),
+                      TextButton.icon(
+                          onPressed: busy ? null : () => _showReceipt(ride),
+                          icon: const Icon(Icons.receipt_long_outlined),
+                          label: const Text('View receipt')),
+                    ]),
                 ],
               ],
             ),
@@ -1363,6 +1385,108 @@ class _HistoryPageState extends State<HistoryPage> {
       },
     );
   }
+}
+
+class _ReceiptSheet extends StatelessWidget {
+  final Map<String, dynamic> receipt;
+  const _ReceiptSheet({required this.receipt});
+
+  String _money(Object? amount) =>
+      '\$${double.tryParse(amount.toString())?.toStringAsFixed(2) ?? '0.00'}';
+
+  String _date(Object? value) {
+    final date = DateTime.tryParse(value?.toString() ?? '');
+    return date == null ? 'Date unavailable' : formatReceiptDate(date);
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(22, 8, 22, 30),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Center(
+                  child: Icon(Icons.check_circle,
+                      size: 44, color: Color(0xFF15803D))),
+              const SizedBox(height: 10),
+              const Center(
+                  child: Text('Payment receipt',
+                      style: TextStyle(
+                          fontSize: 22, fontWeight: FontWeight.w800))),
+              const SizedBox(height: 4),
+              Center(child: Text('Receipt #${receipt['receipt_id']}')),
+              const Divider(height: 28),
+              _ReceiptLine(label: 'Ride', value: '#${receipt['ride_id']}'),
+              _ReceiptLine(
+                  label: 'Passenger',
+                  value: '${receipt['rider_name'] ?? 'Passenger'}'),
+              _ReceiptLine(
+                  label: 'Driver',
+                  value: '${receipt['driver_name'] ?? 'Driver'}'),
+              _ReceiptLine(
+                  label: 'Pickup',
+                  value: '${receipt['pickup_location'] ?? '-'}'),
+              if ((receipt['destination'] ?? '').toString().isNotEmpty)
+                _ReceiptLine(
+                    label: 'Destination', value: '${receipt['destination']}'),
+              _ReceiptLine(
+                  label: 'Payment method',
+                  value: '${receipt['payment_method'] ?? 'cash'}'),
+              _ReceiptLine(label: 'Paid', value: _date(receipt['paid_at'])),
+              const Divider(height: 26),
+              Row(children: [
+                const Expanded(
+                    child: Text('Total paid',
+                        style: TextStyle(fontWeight: FontWeight.w800))),
+                Text(_money(receipt['amount']),
+                    style: const TextStyle(
+                        fontSize: 22, fontWeight: FontWeight.w900)),
+              ]),
+              const SizedBox(height: 14),
+              SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Done'))),
+            ],
+          ),
+        ),
+      );
+}
+
+bool _asBool(Object? value) =>
+    value == true || value == 1 || value == '1' || value == 'true';
+
+class _ReceiptLine extends StatelessWidget {
+  final String label;
+  final String value;
+  const _ReceiptLine({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(
+              width: 112,
+              child: Text(label,
+                  style: const TextStyle(color: Color(0xFF6B7280)))),
+          Expanded(
+              child: Text(value,
+                  textAlign: TextAlign.end,
+                  style: const TextStyle(fontWeight: FontWeight.w600))),
+        ]),
+      );
+}
+
+String formatReceiptDate(DateTime date) {
+  final local = date.toLocal();
+  final mm = local.month.toString().padLeft(2, '0');
+  final dd = local.day.toString().padLeft(2, '0');
+  final hh = local.hour.toString().padLeft(2, '0');
+  final min = local.minute.toString().padLeft(2, '0');
+  return '${local.year}-$mm-$dd $hh:$min';
 }
 
 class _TrackRideSheet extends StatefulWidget {

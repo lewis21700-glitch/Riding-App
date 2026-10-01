@@ -877,6 +877,21 @@ def create_payment(body: PaymentBody, rider=Depends(require_role("rider"))):
     return {"message": "Cash payment recorded", "payment_id": payment_id, "amount": ride["fare"]}
 
 
+@app.get("/api/rides/{ride_id}/receipt")
+def ride_receipt(ride_id: int, rider=Depends(require_role("rider"))):
+    receipt = rows(
+        "SELECT p.id AS receipt_id,p.ride_id,p.amount,p.payment_method,p.created_at AS paid_at,"
+        "r.pickup_location,r.destination,r.ride_type,r.distance_km,u.name AS rider_name,"
+        "d.name AS driver_name FROM payments p JOIN rides r ON r.id=p.ride_id "
+        "JOIN users u ON u.id=r.rider_id LEFT JOIN users d ON d.id=r.driver_id "
+        "WHERE p.ride_id=:ride AND r.rider_id=:rider AND p.status='paid'",
+        {"ride": ride_id, "rider": rider["id"]},
+    )
+    if not receipt:
+        fail(404, "Paid receipt not found")
+    return receipt[0]
+
+
 @app.post("/api/ratings", status_code=201)
 def rate_ride(body: RatingBody, user=Depends(jwt_subject)):
     found = rows("SELECT id,rider_id,driver_id,status FROM rides WHERE id=:id", {"id": body.ride_id})

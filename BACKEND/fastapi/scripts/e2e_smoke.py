@@ -179,6 +179,9 @@ def main() -> int:
         payment = client.post("/api/payments", headers=passenger_headers,
                               json={"ride_id": ride_id, "payment_method": "cash"})
         require(payment.status_code == 201, f"Cash payment failed: {payment.text}")
+        receipt = client.get(f"/api/rides/{ride_id}/receipt", headers=passenger_headers)
+        require(receipt.status_code == 200 and receipt.json().get("receipt_id") == payment.json().get("payment_id"),
+                f"Paid receipt lookup failed: {receipt.text}")
         rating = client.post("/api/ratings", headers=passenger_headers,
                              json={"ride_id": ride_id, "score": 5, "comment": "Smoke test"})
         require(rating.status_code == 201, f"Ride rating failed: {rating.text}")
@@ -187,7 +190,7 @@ def main() -> int:
             ride["id"] == ride_id and ride["paid"] and ride["rated"]
             for ride in passenger_rides.json()["rides"]
         ), "Ride history does not show payment and rating")
-        print("PASS cash payment, rating, and passenger ride history")
+        print("PASS cash payment, receipt, rating, and passenger ride history")
 
     print(f"Smoke test passed. Test records were created for run {run_id}.")
     return 0

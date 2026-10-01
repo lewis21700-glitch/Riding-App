@@ -230,6 +230,13 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
                        json={"ride_id": ride_id, "payment_method": "cash"}).status_code == 201
     assert client.post("/api/payments", headers=rider_auth,
                        json={"ride_id": ride_id, "payment_method": "cash"}).status_code == 409
+    receipt = client.get(f"/api/rides/{ride_id}/receipt", headers=rider_auth)
+    assert receipt.status_code == 200
+    assert receipt.json()["ride_id"] == ride_id
+    assert receipt.json()["payment_method"] == "cash"
+    assert float(receipt.json()["amount"]) == 6.5
+    other_rider, other_rider_token = register(client, "rider", "receipt-owner-check")
+    assert client.get(f"/api/rides/{ride_id}/receipt", headers=auth(other_rider_token)).status_code == 404
     assert client.post("/api/ratings", headers=rider_auth,
                        json={"ride_id": ride_id, "score": 5, "comment": "Great ride"}).status_code == 201
     assert client.post("/api/ratings", headers=rider_auth,

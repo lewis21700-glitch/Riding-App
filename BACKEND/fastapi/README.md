@@ -32,7 +32,7 @@ With the API running against a disposable development/test database, execute:
 python scripts/e2e_smoke.py --api-url http://127.0.0.1:3000 --allow-writes
 ```
 
-The script checks API/database health, Swagger/OpenAPI, passenger and driver registration/login, role restrictions, vehicle onboarding, fare estimate, driver matching, inbox notification, trip lifecycle and location tracking, cash payment, rating, and ride history. It creates two uniquely named accounts, a vehicle, ride, payment, rating, notifications, and location record; those records are intentionally not deleted. Use only a development/test database. Omit `--allow-writes` to see the safety guard. Remote API hosts also require `--allow-nonlocal` as an additional safeguard.
+The script checks API/database health, Swagger/OpenAPI, passenger and driver registration/login, role restrictions, vehicle onboarding, fare estimate, driver matching, inbox notification, trip lifecycle and location tracking, cash payment and receipt, rating, and ride history. It creates two uniquely named accounts, a vehicle, ride, payment, rating, notifications, and location record; those records are intentionally not deleted. Use only a development/test database. Omit `--allow-writes` to see the safety guard. Remote API hosts also require `--allow-nonlocal` as an additional safeguard.
 
 ## Compatibility and security
 
