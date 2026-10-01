@@ -146,6 +146,17 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert client.put(f"/api/drivers/{driver['id']}/availability", headers=driver_auth,
                       json={"availability": "online"}).status_code == 200
 
+    coordinate_estimate = client.post("/api/fare/estimate", headers=rider_auth, json={
+        "ride_type": "Car",
+        "pickup_lat": 11.56,
+        "pickup_lng": 104.92,
+        "destination_lat": 11.57,
+        "destination_lng": 104.93,
+    })
+    expected_distance = round(api.distance_between(11.56, 104.92, 11.57, 104.93) * 1.25, 2)
+    assert coordinate_estimate.status_code == 200
+    assert coordinate_estimate.json()["distance_km"] == expected_distance
+
     estimate = client.post("/api/fare/estimate", headers=rider_auth, json={
         "ride_type": "tukTuk", "distance_km": 10
     })

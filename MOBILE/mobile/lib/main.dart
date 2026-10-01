@@ -661,6 +661,8 @@ class _BookingPageState extends State<BookingPage> {
   bool booking = false;
   double? estimatedFare;
   double? distanceKm;
+  double? pickupLatitude;
+  double? pickupLongitude;
   String? message;
 
   Future<void> useCurrentLocation() async {
@@ -683,7 +685,14 @@ class _BookingPageState extends State<BookingPage> {
         throw Exception('Location permission was not granted.');
       }
 
-      final pos = await Geolocator.getCurrentPosition();
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 20),
+        ),
+      );
+      pickupLatitude = pos.latitude;
+      pickupLongitude = pos.longitude;
       pickup.text =
           'GPS: ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}';
       if (mounted) setState(() {});
@@ -726,6 +735,10 @@ class _BookingPageState extends State<BookingPage> {
           'pickup': pickup.text.trim(),
           'destination': destination.text.trim(),
           'ride_type': type.name,
+          if (pickupLatitude != null && pickupLongitude != null) ...{
+            'pickup_lat': pickupLatitude,
+            'pickup_lng': pickupLongitude,
+          },
         },
       );
       final rawFare = data['estimated_fare'] ?? data['fare'];
@@ -777,6 +790,10 @@ class _BookingPageState extends State<BookingPage> {
           'ride_type': type.name,
           'fare': type == RideType.direct ? null : estimatedFare,
           'distance_km': distanceKm,
+          if (pickupLatitude != null && pickupLongitude != null) ...{
+            'pickup_lat': pickupLatitude,
+            'pickup_lng': pickupLongitude,
+          },
         },
       );
 
@@ -820,6 +837,8 @@ class _BookingPageState extends State<BookingPage> {
 
       pickup.clear();
       destination.clear();
+      pickupLatitude = null;
+      pickupLongitude = null;
       estimatedFare = null;
       distanceKm = null;
       message = null;
@@ -882,6 +901,8 @@ class _BookingPageState extends State<BookingPage> {
                   TextField(
                     controller: pickup,
                     onChanged: (_) => setState(() {
+                      pickupLatitude = null;
+                      pickupLongitude = null;
                       estimatedFare = null;
                       distanceKm = null;
                     }),
@@ -1544,14 +1565,17 @@ class _NotificationsPageState extends State<NotificationsPage> {
                     : notifications.isEmpty
                         ? ListView(children: const [
                             SizedBox(height: 170),
-                            Center(child: Icon(Icons.notifications_none, size: 42)),
+                            Center(
+                                child:
+                                    Icon(Icons.notifications_none, size: 42)),
                             SizedBox(height: 12),
                             Center(child: Text('You are all caught up')),
                           ])
                         : ListView.separated(
                             padding: const EdgeInsets.all(16),
                             itemCount: notifications.length,
-                            separatorBuilder: (_, __) => const SizedBox(height: 8),
+                            separatorBuilder: (_, __) =>
+                                const SizedBox(height: 8),
                             itemBuilder: (context, index) {
                               final item = notifications[index];
                               final unread = item['is_read'] != true;
@@ -1583,12 +1607,11 @@ class _NotificationsPageState extends State<NotificationsPage> {
                                           : FontWeight.w600,
                                     ),
                                   ),
-                                  subtitle: Text(
-                                      item['message']?.toString() ?? ''),
+                                  subtitle:
+                                      Text(item['message']?.toString() ?? ''),
                                   trailing: unread
                                       ? const Icon(Icons.circle,
-                                          size: 10,
-                                          color: Color(0xFF2563EB))
+                                          size: 10, color: Color(0xFF2563EB))
                                       : null,
                                 ),
                               );

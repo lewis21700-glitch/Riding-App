@@ -26,6 +26,7 @@ class _DriverHomePageState extends State<DriverHomePage>
   Timer? locationTimer;
   Timer? rideRefreshTimer;
   bool requestActive = false;
+  bool locationRequestActive = false;
   int? locationRideId;
 
   @override
@@ -276,6 +277,8 @@ class _DriverHomePageState extends State<DriverHomePage>
   }
 
   Future<void> _sendLocation(int rideId) async {
+    if (locationRequestActive) return;
+    locationRequestActive = true;
     try {
       if (!await Geolocator.isLocationServiceEnabled()) return;
       var permission = await Geolocator.checkPermission();
@@ -286,7 +289,12 @@ class _DriverHomePageState extends State<DriverHomePage>
           permission == LocationPermission.deniedForever) {
         return;
       }
-      final position = await Geolocator.getCurrentPosition();
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 15),
+        ),
+      );
       final token = await _token;
       if (token == null) return;
       await Api.request('POST', '/driver-location?ride_id=$rideId',
@@ -298,6 +306,8 @@ class _DriverHomePageState extends State<DriverHomePage>
           });
     } catch (_) {
       // Location sharing retries on the next foreground update.
+    } finally {
+      locationRequestActive = false;
     }
   }
 
@@ -331,10 +341,8 @@ class _DriverHomePageState extends State<DriverHomePage>
         actions: [
           IconButton(
               tooltip: 'Notifications',
-              onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => const NotificationsPage())),
+              onPressed: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const NotificationsPage())),
               icon: const Icon(Icons.notifications_outlined)),
           IconButton(
               tooltip: 'Refresh',
