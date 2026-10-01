@@ -3,6 +3,7 @@
 **/__pycache__/
 **/.pytest_cache/
 **/.dart_tool/
+**/.flutter-state/
 **/.pub-cache/
 **/.flutter-plugins
 **/.flutter-plugins-dependencies

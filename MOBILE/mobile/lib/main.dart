@@ -511,7 +511,7 @@ class _RegisterPageState extends State<RegisterPage> {
       );
 }
 
-enum RideType { car, tukTuk, direct }
+enum RideType { car, tukTuk, motorbike, direct }
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -863,18 +863,21 @@ class _BookingPageState extends State<BookingPage> {
   String title(RideType t) => switch (t) {
         RideType.car => 'Car',
         RideType.tukTuk => 'TukTuk',
+        RideType.motorbike => 'Motorbike',
         RideType.direct => 'Direct Ride',
       };
 
   String subtitle(RideType t) => switch (t) {
         RideType.car => 'Comfortable city car',
         RideType.tukTuk => 'Popular Cambodia ride',
+        RideType.motorbike => 'Quick and affordable',
         RideType.direct => 'No destination • final fare later',
       };
 
   IconData icon(RideType t) => switch (t) {
         RideType.car => Icons.directions_car_filled_rounded,
         RideType.tukTuk => Icons.electric_rickshaw_rounded,
+        RideType.motorbike => Icons.two_wheeler_rounded,
         RideType.direct => Icons.route_rounded,
       };
 

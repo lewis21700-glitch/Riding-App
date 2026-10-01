@@ -42,4 +42,16 @@ void main() {
     expect(find.text('Pay cash'), findsNothing);
     expect(find.text('Rate driver'), findsNothing);
   });
+
+  testWidgets('booking offers every backend ride type',
+      (WidgetTester tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: BookingPage(onBooked: () async {})),
+    ));
+
+    expect(find.text('Car'), findsOneWidget);
+    expect(find.text('TukTuk'), findsOneWidget);
+    expect(find.text('Motorbike'), findsOneWidget);
+    expect(find.text('Direct Ride'), findsOneWidget);
+  });
 }
