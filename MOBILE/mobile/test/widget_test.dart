@@ -54,4 +54,16 @@ void main() {
     expect(find.text('Motorbike'), findsOneWidget);
     expect(find.text('Direct Ride'), findsOneWidget);
   });
+
+  test('unread notification count accepts MySQL integer flags', () {
+    expect(
+      unreadNotificationCount([
+        {'id': 1, 'is_read': 0},
+        {'id': 2, 'is_read': 1},
+        {'id': 3, 'is_read': false},
+        {'id': 4, 'is_read': true},
+      ]),
+      2,
+    );
+  });
 }

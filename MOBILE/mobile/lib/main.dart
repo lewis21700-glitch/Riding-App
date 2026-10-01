@@ -147,6 +147,96 @@ class Session {
   }
 }
 
+int unreadNotificationCount(Iterable<Map<String, dynamic>> notifications) =>
+    notifications.where((item) => !_asBool(item['is_read'])).length;
+
+class NotificationBell extends StatefulWidget {
+  const NotificationBell({super.key});
+
+  @override
+  State<NotificationBell> createState() => _NotificationBellState();
+}
+
+class _NotificationBellState extends State<NotificationBell>
+    with WidgetsBindingObserver {
+  Timer? refreshTimer;
+  bool requestActive = false;
+  int unreadCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _loadCount();
+    _startRefresh();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _startRefresh();
+      _loadCount();
+    } else {
+      refreshTimer?.cancel();
+      refreshTimer = null;
+    }
+  }
+
+  void _startRefresh() {
+    refreshTimer?.cancel();
+    refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _loadCount();
+    });
+  }
+
+  Future<void> _loadCount() async {
+    if (requestActive) return;
+    requestActive = true;
+    try {
+      final token = await Session.token();
+      if (token == null) return;
+      final data = await Api.request('GET', '/my-notifications', token: token);
+      final notifications = ((data as Map)['notifications'] as List? ?? [])
+          .map((item) => Map<String, dynamic>.from(item));
+      if (mounted) {
+        setState(() => unreadCount = unreadNotificationCount(notifications));
+      }
+    } catch (_) {
+      // Keep the last known badge while the API is temporarily unavailable.
+    } finally {
+      requestActive = false;
+    }
+  }
+
+  Future<void> _openNotifications() async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(builder: (_) => const NotificationsPage()),
+    );
+    if (mounted) await _loadCount();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+        tooltip: unreadCount == 0
+            ? 'Notifications'
+            : '$unreadCount unread notifications',
+        onPressed: _openNotifications,
+        icon: Badge(
+          isLabelVisible: unreadCount > 0,
+          label: Text(unreadCount > 99 ? '99+' : '$unreadCount'),
+          child: const Icon(Icons.notifications_outlined),
+        ),
+      );
+}
+
 class SplashGate extends StatefulWidget {
   const SplashGate({super.key});
   @override
@@ -608,14 +698,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           title: const Text('RideApp',
               style: TextStyle(fontWeight: FontWeight.w800)),
           actions: [
-            IconButton(
-              tooltip: 'Notifications',
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const NotificationsPage()),
-              ),
-              icon: const Icon(Icons.notifications_outlined),
-            ),
+            const NotificationBell(),
             IconButton(
               onPressed: () => Navigator.push(
                 context,
@@ -1821,19 +1904,45 @@ class NotificationsPage extends StatefulWidget {
   State<NotificationsPage> createState() => _NotificationsPageState();
 }
 
-class _NotificationsPageState extends State<NotificationsPage> {
+class _NotificationsPageState extends State<NotificationsPage>
+    with WidgetsBindingObserver {
+  // Keep the inbox fresh while visible, then resume polling when reopened.
+  Timer? refreshTimer;
   List<Map<String, dynamic>> notifications = [];
   bool loading = true;
+  bool requestActive = false;
   String? error;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     load();
+    _startRefresh();
   }
 
-  Future<void> load() async {
-    if (mounted) setState(() => loading = true);
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _startRefresh();
+      load(showLoading: false);
+    } else {
+      refreshTimer?.cancel();
+      refreshTimer = null;
+    }
+  }
+
+  void _startRefresh() {
+    refreshTimer?.cancel();
+    refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      load(showLoading: false);
+    });
+  }
+
+  Future<void> load({bool showLoading = true}) async {
+    if (requestActive) return;
+    requestActive = true;
+    if (showLoading && mounted) setState(() => loading = true);
     try {
       final token = await Session.token();
       if (token == null) throw Exception('Please sign in again.');
@@ -1851,12 +1960,13 @@ class _NotificationsPageState extends State<NotificationsPage> {
         setState(() => error = e.toString().replaceFirst('Exception: ', ''));
       }
     } finally {
-      if (mounted) setState(() => loading = false);
+      requestActive = false;
+      if (mounted && showLoading) setState(() => loading = false);
     }
   }
 
   Future<void> markRead(Map<String, dynamic> notification) async {
-    if (notification['is_read'] == true) return;
+    if (_asBool(notification['is_read'])) return;
     final token = await Session.token();
     if (token == null) return;
     try {
@@ -1870,6 +1980,13 @@ class _NotificationsPageState extends State<NotificationsPage> {
             content: Text(e.toString().replaceFirst('Exception: ', ''))));
       }
     }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    refreshTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -1904,7 +2021,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
                                 const SizedBox(height: 8),
                             itemBuilder: (context, index) {
                               final item = notifications[index];
-                              final unread = item['is_read'] != true;
+                              final unread = !_asBool(item['is_read']);
                               return Card(
                                 elevation: 0,
                                 shape: RoundedRectangleBorder(
