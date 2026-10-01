@@ -199,4 +199,3 @@ if __name__ == "__main__":
     except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as error:
         print(f"FAIL {error}", file=sys.stderr)
         raise SystemExit(1) from error
-
