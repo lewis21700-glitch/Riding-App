@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
-import 'main.dart' show Api, Session;
+import 'main.dart' show Api, NotificationsPage, Session;
 
 class DriverHomePage extends StatefulWidget {
   final Map<String, dynamic> user;
@@ -329,6 +329,13 @@ class _DriverHomePageState extends State<DriverHomePage>
         title: const Text('Driver center',
             style: TextStyle(fontWeight: FontWeight.w800)),
         actions: [
+          IconButton(
+              tooltip: 'Notifications',
+              onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const NotificationsPage())),
+              icon: const Icon(Icons.notifications_outlined)),
           IconButton(
               tooltip: 'Refresh',
               onPressed: loading ? null : load,

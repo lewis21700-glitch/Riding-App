@@ -165,6 +165,15 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert booking.status_code == 201, booking.text
     ride_id = booking.json()["ride_id"]
 
+    driver_notifications = client.get("/api/my-notifications", headers=driver_auth).json()["notifications"]
+    ride_notification = next(item for item in driver_notifications if item["title"] == "New ride request")
+    rider_notifications = client.get("/api/my-notifications", headers=rider_auth).json()["notifications"]
+    assert all(item["id"] != ride_notification["id"] for item in rider_notifications)
+    assert client.put(f"/api/my-notifications/{ride_notification['id']}/read",
+                      headers=rider_auth).status_code == 404
+    assert client.put(f"/api/my-notifications/{ride_notification['id']}/read",
+                      headers=driver_auth).status_code == 200
+
     offers = client.get("/api/driver-rides", headers=driver_auth).json()
     assert any(ride["id"] == ride_id for ride in offers)
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,

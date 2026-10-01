@@ -599,6 +599,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               style: TextStyle(fontWeight: FontWeight.w800)),
           actions: [
             IconButton(
+              tooltip: 'Notifications',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const NotificationsPage()),
+              ),
+              icon: const Icon(Icons.notifications_outlined),
+            ),
+            IconButton(
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(builder: (_) => ProfilePage(user: user)),
@@ -1457,6 +1465,137 @@ class _StatusPill extends StatelessWidget {
       ),
     );
   }
+}
+
+class NotificationsPage extends StatefulWidget {
+  const NotificationsPage({super.key});
+
+  @override
+  State<NotificationsPage> createState() => _NotificationsPageState();
+}
+
+class _NotificationsPageState extends State<NotificationsPage> {
+  List<Map<String, dynamic>> notifications = [];
+  bool loading = true;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    if (mounted) setState(() => loading = true);
+    try {
+      final token = await Session.token();
+      if (token == null) throw Exception('Please sign in again.');
+      final data = await Api.request('GET', '/my-notifications', token: token);
+      final items = ((data as Map)['notifications'] as List? ?? [])
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        notifications = items;
+        error = null;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => error = e.toString().replaceFirst('Exception: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> markRead(Map<String, dynamic> notification) async {
+    if (notification['is_read'] == true) return;
+    final token = await Session.token();
+    if (token == null) return;
+    try {
+      await Api.request('PUT', '/my-notifications/${notification['id']}/read',
+          token: token);
+      if (!mounted) return;
+      setState(() => notification['is_read'] = true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(e.toString().replaceFirst('Exception: ', ''))));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Notifications')),
+        body: loading && notifications.isEmpty
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: load,
+                child: error != null && notifications.isEmpty
+                    ? ListView(children: [
+                        const SizedBox(height: 150),
+                        Center(child: Text(error!)),
+                        Center(
+                            child: TextButton(
+                                onPressed: load,
+                                child: const Text('Try again'))),
+                      ])
+                    : notifications.isEmpty
+                        ? ListView(children: const [
+                            SizedBox(height: 170),
+                            Center(child: Icon(Icons.notifications_none, size: 42)),
+                            SizedBox(height: 12),
+                            Center(child: Text('You are all caught up')),
+                          ])
+                        : ListView.separated(
+                            padding: const EdgeInsets.all(16),
+                            itemCount: notifications.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 8),
+                            itemBuilder: (context, index) {
+                              final item = notifications[index];
+                              final unread = item['is_read'] != true;
+                              return Card(
+                                elevation: 0,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(15),
+                                  side: BorderSide(
+                                    color: unread
+                                        ? const Color(0xFFBFDBFE)
+                                        : const Color(0xFFE5E7EB),
+                                  ),
+                                ),
+                                child: ListTile(
+                                  onTap: () => markRead(item),
+                                  leading: Icon(
+                                    unread
+                                        ? Icons.mark_email_unread_outlined
+                                        : Icons.drafts_outlined,
+                                    color: unread
+                                        ? const Color(0xFF2563EB)
+                                        : const Color(0xFF6B7280),
+                                  ),
+                                  title: Text(
+                                    item['title']?.toString() ?? 'Ride update',
+                                    style: TextStyle(
+                                      fontWeight: unread
+                                          ? FontWeight.w800
+                                          : FontWeight.w600,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                      item['message']?.toString() ?? ''),
+                                  trailing: unread
+                                      ? const Icon(Icons.circle,
+                                          size: 10,
+                                          color: Color(0xFF2563EB))
+                                      : null,
+                                ),
+                              );
+                            },
+                          ),
+              ),
+      );
 }
 
 class ProfilePage extends StatefulWidget {
