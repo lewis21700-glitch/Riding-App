@@ -145,6 +145,22 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert vehicle.status_code == 201
     assert client.put(f"/api/drivers/{driver['id']}/availability", headers=driver_auth,
                       json={"availability": "online"}).status_code == 200
+    car_driver, car_token = register(client, "driver", "car-only-driver")
+    car_auth = auth(car_token)
+    assert client.post("/api/my-vehicle", headers=car_auth, json={
+        "vehicle_type": "Car", "vehicle_model": "Car only", "plate_number": "TEST-CAR"
+    }).status_code == 201
+    assert client.put(f"/api/drivers/{car_driver['id']}/availability", headers=car_auth,
+                      json={"availability": "online"}).status_code == 200
+    unregistered_driver, unregistered_token = register(client, "driver", "no-vehicle-driver")
+    unregistered_auth = auth(unregistered_token)
+    api.execute("UPDATE users SET availability='available' WHERE id=:id",
+                {"id": unregistered_driver["id"]})
+    late_driver, late_token = register(client, "driver", "late-online-driver")
+    late_auth = auth(late_token)
+    assert client.post("/api/my-vehicle", headers=late_auth, json={
+        "vehicle_type": "Tuk Tuk", "vehicle_model": "Late online tuk tuk", "plate_number": "TEST-LATE"
+    }).status_code == 201
 
     coordinate_estimate = client.post("/api/fare/estimate", headers=rider_auth, json={
         "ride_type": "Car",
@@ -175,6 +191,10 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     })
     assert booking.status_code == 201, booking.text
     ride_id = booking.json()["ride_id"]
+    assert client.put(f"/api/drivers/{late_driver['id']}/availability", headers=late_auth,
+                      json={"availability": "online"}).status_code == 200
+    late_offers = client.get("/api/driver-rides", headers=late_auth).json()
+    assert any(item["id"] == ride_id for item in late_offers)
 
     driver_notifications = client.get("/api/my-notifications", headers=driver_auth).json()["notifications"]
     ride_notification = next(item for item in driver_notifications if item["title"] == "New ride request")
@@ -187,6 +207,14 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
 
     offers = client.get("/api/driver-rides", headers=driver_auth).json()
     assert any(ride["id"] == ride_id for ride in offers)
+    car_offers = client.get("/api/driver-rides", headers=car_auth).json()
+    assert all(ride["id"] != ride_id for ride in car_offers)
+    assert client.put(f"/api/driver-rides/{ride_id}", headers=car_auth,
+                      json={"status": "accepted"}).status_code == 409
+    assert client.get("/api/profile", headers=car_auth).json()["availability"] == "available"
+    assert client.put(f"/api/driver-rides/{ride_id}", headers=unregistered_auth,
+                      json={"status": "accepted"}).status_code == 409
+    assert client.get("/api/profile", headers=unregistered_auth).json()["availability"] == "available"
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,
                       json={"status": "accepted"}).status_code == 200
     second_booking = client.post("/api/rides", headers=rider_auth, json={

@@ -284,6 +284,16 @@ def normalize_ride_type(value: str) -> str:
     return ride_type
 
 
+def normalize_vehicle_type(value: str) -> str:
+    return re.sub(r"[\s-]+", "", value.strip().lower())
+
+
+def vehicle_matches_ride(ride_type: str, vehicle_type: str) -> bool:
+    if ride_type == "Direct Ride":
+        return True
+    return normalize_vehicle_type(ride_type) == normalize_vehicle_type(vehicle_type)
+
+
 def distance_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radius = 6371.0088
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -329,13 +339,14 @@ def notify(user_id: int | None, title: str, message: str, kind: str = "system") 
     )
 
 
-def add_ride_offer(ride_id: int, driver_id: int) -> None:
+def add_ride_offer(ride_id: int, driver_id: int) -> bool:
     statement = (
         "INSERT OR IGNORE INTO ride_offers(ride_id,driver_id,status) VALUES(:ride,:driver,'offered')"
         if engine.dialect.name == "sqlite"
         else "INSERT IGNORE INTO ride_offers(ride_id,driver_id,status) VALUES(:ride,:driver,'offered')"
     )
-    execute(statement, {"ride": ride_id, "driver": driver_id})
+    count, _ = execute(statement, {"ride": ride_id, "driver": driver_id})
+    return bool(count)
 
 
 def set_ride_offer(ride_id: int, driver_id: int, offer_status: str) -> None:
@@ -347,6 +358,34 @@ def set_ride_offer(ride_id: int, driver_id: int, offer_status: str) -> None:
         "ON DUPLICATE KEY UPDATE status=VALUES(status)"
     )
     execute(statement, {"ride": ride_id, "driver": driver_id, "status": offer_status})
+
+
+def notify_ride_offer(ride_id: int, driver_id: int) -> None:
+    if add_ride_offer(ride_id, driver_id):
+        notify(driver_id, "New ride request", f"Ride #{ride_id} is waiting for a driver.", "ride")
+
+
+def offer_ride_to_available_drivers(ride_id: int, ride_type: str) -> None:
+    candidates = rows(
+        "SELECT DISTINCT u.id,v.vehicle_type FROM users u JOIN vehicles v ON v.driver_id=u.id "
+        "WHERE u.role='driver' AND u.availability='available'"
+    )
+    for candidate in candidates:
+        if vehicle_matches_ride(ride_type, candidate["vehicle_type"]):
+            notify_ride_offer(ride_id, candidate["id"])
+
+
+def offer_pending_rides_to_driver(driver_id: int) -> None:
+    vehicle_types = [item["vehicle_type"] for item in rows(
+        "SELECT vehicle_type FROM vehicles WHERE driver_id=:driver", {"driver": driver_id}
+    )]
+    if not vehicle_types:
+        return
+    pending = rows("SELECT id,ride_type FROM rides WHERE status='requested' AND driver_id IS NULL")
+    for ride in pending:
+        if any(vehicle_matches_ride(ride["ride_type"], vehicle_type)
+               for vehicle_type in vehicle_types):
+            notify_ride_offer(ride["id"], driver_id)
 
 
 def save_driver_location(driver_id: int, ride_id: int | None, location: LocationBody) -> None:
@@ -563,6 +602,8 @@ def update_availability(driver_id: int, body: AvailabilityBody, user=Depends(jwt
                        {"id": driver_id, "availability": value})
     if not count:
         fail(404, "Driver not found")
+    if value == "available":
+        offer_pending_rides_to_driver(driver_id)
     return {"message": "Availability updated", "availability": body.availability}
 
 
@@ -690,10 +731,7 @@ async def request_ride(body: RideBody, rider=Depends(require_role("rider"))):
                          "VALUES(:rider,:pickup,:destination,:type,:distance,:pickup_lat,:pickup_lng,"
                          ":dest_lat,:dest_lng,:fare,:fare,'requested')", params)
     event(ride_id, rider["id"], "requested")
-    offered = rows("SELECT id FROM users WHERE role='driver' AND availability='available'")
-    for driver in offered:
-        add_ride_offer(ride_id, driver["id"])
-        notify(driver["id"], "New ride request", f"Ride #{ride_id} is waiting for a driver.", "ride")
+    offer_ride_to_available_drivers(ride_id, ride_type)
     return {"message": "Ride requested successfully", "ride_id": ride_id,
             "ride": {"id": ride_id, "status": "requested", "fare": fare},
             "estimated_fare": fare, "direct": direct}
@@ -726,7 +764,11 @@ def driver_rides(driver=Depends(require_role("driver"))):
                 "r.status,r.created_at FROM rides r JOIN users u ON u.id=r.rider_id "
                 "LEFT JOIN ride_offers o ON o.ride_id=r.id AND o.driver_id=:driver "
                 "WHERE r.driver_id=:driver OR (r.status='requested' AND r.driver_id IS NULL "
-                "AND COALESCE(o.status,'offered')<>'rejected') ORDER BY r.id DESC", {"driver": driver["id"]})
+                "AND o.status='offered' AND (r.ride_type='Direct Ride' OR EXISTS "
+                "(SELECT 1 FROM vehicles v WHERE v.driver_id=:driver AND "
+                "LOWER(REPLACE(REPLACE(TRIM(v.vehicle_type),' ',''),'-',''))="
+                "LOWER(REPLACE(REPLACE(TRIM(r.ride_type),' ',''),'-',''))))) "
+                "ORDER BY r.id DESC", {"driver": driver["id"]})
 
 
 @app.put("/api/driver-rides/{ride_id}")
@@ -743,20 +785,32 @@ def driver_ride_action(ride_id: int, body: DriverRideAction, driver=Depends(requ
     if body.status == "accepted":
         if driver.get("availability") != "available":
             fail(409, "Go online before accepting a ride")
+        compatible_vehicles = rows("SELECT vehicle_type FROM vehicles WHERE driver_id=:driver",
+                                    {"driver": driver["id"]})
+        if not any(vehicle_matches_ride(ride["ride_type"], vehicle["vehicle_type"])
+                   for vehicle in compatible_vehicles):
+            fail(409, "Register a vehicle that matches this ride type before accepting")
+        vehicle_filter = ""
+        claim_params = {"driver": driver["id"], "ride": ride_id}
+        if ride["ride_type"] != "Direct Ride":
+            vehicle_filter = " AND LOWER(REPLACE(REPLACE(TRIM(v.vehicle_type),' ',''),'-',''))=:vehicle_type"
+            claim_params["vehicle_type"] = normalize_vehicle_type(ride["ride_type"])
         # Reserve the driver and claim the ride in one transaction so parallel
         # accept requests cannot assign two rides to the same driver.
         with engine.begin() as conn:
             available = conn.execute(
                 text("UPDATE users SET availability='on_ride' "
-                     "WHERE id=:driver AND role='driver' AND availability='available'"),
-                {"driver": driver["id"]},
+                     "WHERE id=:driver AND role='driver' AND availability='available' "
+                     "AND EXISTS (SELECT 1 FROM vehicles v WHERE v.driver_id=users.id"
+                     f"{vehicle_filter})"),
+                claim_params,
             )
             if not available.rowcount:
                 fail(409, "You are no longer available to accept a ride")
             claimed = conn.execute(
                 text("UPDATE rides SET driver_id=:driver,status='accepted' "
                      "WHERE id=:ride AND status='requested' AND driver_id IS NULL"),
-                {"ride": ride_id, "driver": driver["id"]},
+                claim_params,
             )
             if not claimed.rowcount:
                 fail(409, "This ride has already been accepted")
