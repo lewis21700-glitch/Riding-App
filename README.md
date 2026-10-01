@@ -25,6 +25,14 @@ The Android emulator reaches the host API at `10.0.2.2:3000`. For a physical dev
 flutter run --dart-define=API_BASE_URL=http://192.168.1.20:3000/api
 ```
 
+To enable Android push notifications, configure the Firebase Android app in the Firebase console and pass its public app options to Flutter at build/run time:
+
+```powershell
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:3000/api --dart-define=FIREBASE_API_KEY=your-api-key --dart-define=FIREBASE_APP_ID=1:123456789:android:abcdef --dart-define=FIREBASE_MESSAGING_SENDER_ID=123456789 --dart-define=FIREBASE_PROJECT_ID=your-firebase-project
+```
+
+Use the matching Firebase project ID and server service-account credentials in `BACKEND/fastapi/.env`. Push support stays inactive when the Flutter options or backend credentials are absent. Firebase app options are public identifiers; never pass a service-account private key to the app or commit it.
+
 Use HTTPS and a deployed API URL for release builds. Debug builds allow HTTP for local development only.
 
 ## Verify and package

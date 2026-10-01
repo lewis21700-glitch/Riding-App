@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import itertools
+import sys
+from types import ModuleType, SimpleNamespace
 
 import bcrypt
 import pytest
@@ -284,6 +286,38 @@ def test_push_tokens_upsert_across_accounts(client):
                        headers=auth(driver_token)).status_code == 201
     assert api.rows("SELECT COUNT(*) AS count FROM push_tokens WHERE token=:token",
                     {"token": token})[0]["count"] == 1
+    assert client.delete("/api/push-tokens", headers=auth(driver_token)).status_code == 204
+    assert api.rows("SELECT COUNT(*) AS count FROM push_tokens WHERE token=:token",
+                    {"token": token})[0]["count"] == 0
+
+
+def test_notification_attempts_fcm_delivery_without_blocking_inbox(client, monkeypatch):
+    user, token = register(client, "rider", "push-delivery")
+    device_token = "device-registration-token-00000002"
+    assert client.post(f"/api/push-tokens?token={device_token}",
+                       headers=auth(token)).status_code == 201
+    sent = []
+    firebase = ModuleType("firebase_admin")
+    firebase.credentials = SimpleNamespace(Certificate=lambda path: path)
+    firebase.get_app = lambda: (_ for _ in ()).throw(ValueError("not initialized"))
+    firebase.initialize_app = lambda credential, options: "firebase-app"
+    firebase.messaging = SimpleNamespace(
+        MulticastMessage=lambda **kwargs: kwargs,
+        Notification=lambda **kwargs: kwargs,
+        send_each_for_multicast=lambda message, app: sent.append((message, app))
+        or SimpleNamespace(responses=[SimpleNamespace(success=True, exception=None)]),
+    )
+    monkeypatch.setitem(sys.modules, "firebase_admin", firebase)
+    monkeypatch.setattr(api, "_firebase_app", None)
+    monkeypatch.setattr(api, "FIREBASE_PROJECT_ID", "test-project")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+
+    api.notify(user["id"], "Ride update", "Your driver accepted.", "ride")
+
+    assert sent[0][1] == "firebase-app"
+    assert sent[0][0]["tokens"] == [device_token]
+    assert api.rows("SELECT title FROM notifications WHERE user_id=:user",
+                    {"user": user["id"]})[0]["title"] == "Ride update"
 
 
 def test_direct_ride_needs_driver_set_fare_and_rejects_invalid_transition(client):

@@ -43,8 +43,10 @@ CORS_ORIGINS = [
 GEOCODER_USER_AGENT = os.getenv(
     "GEOCODER_USER_AGENT", "RideAppDemo/1.0 (local demo)"
 )
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "").strip()
 engine: Engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
 password_hash = PasswordHash.recommended()
+_firebase_app = None
 
 RIDE_ALIASES = {
     "car": "Car",
@@ -337,6 +339,47 @@ def notify(user_id: int | None, title: str, message: str, kind: str = "system") 
         "INSERT INTO notifications(user_id,title,message,type) VALUES(:uid,:title,:message,:kind)",
         {"uid": user_id, "title": title, "message": message, "kind": kind},
     )
+    if user_id is None:
+        return
+    tokens = rows("SELECT token FROM push_tokens WHERE user_id=:user", {"user": user_id})
+    if not tokens:
+        return
+    try:
+        from firebase_admin import credentials, get_app, initialize_app, messaging
+
+        global _firebase_app
+        if _firebase_app is None:
+            try:
+                _firebase_app = get_app()
+            except ValueError:
+                options = {"httpTimeout": 5}
+                if FIREBASE_PROJECT_ID:
+                    options["projectId"] = FIREBASE_PROJECT_ID
+                credential_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+                credential = credentials.Certificate(credential_path) if credential_path else None
+                _firebase_app = initialize_app(credential, options=options)
+        token_values = [str(row["token"]) for row in tokens]
+        for offset in range(0, len(token_values), 500):
+            batch_tokens = token_values[offset:offset + 500]
+            response = messaging.send_each_for_multicast(
+                messaging.MulticastMessage(
+                    tokens=batch_tokens,
+                    notification=messaging.Notification(title=title, body=message),
+                    data={"type": kind},
+                ),
+                app=_firebase_app,
+            )
+            expired = [
+                batch_tokens[index]
+                for index, result in enumerate(response.responses)
+                if not result.success and getattr(result.exception, "code", None)
+                in {"messaging/registration-token-not-registered", "messaging/invalid-registration-token"}
+            ]
+            for token in expired:
+                execute("DELETE FROM push_tokens WHERE token=:token", {"token": token})
+    except Exception:
+        # Inbox persistence and ride actions must remain available without FCM credentials.
+        logger.warning("Push notification delivery failed for user %s", user_id)
 
 
 def add_ride_offer(ride_id: int, driver_id: int) -> bool:
@@ -1007,6 +1050,11 @@ def register_push_token(token: str = Query(min_length=20, max_length=512),
     )
     execute(statement, {"user": user["id"], "token": token, "platform": platform})
     return {"message": "Push token registered"}
+
+
+@app.delete("/api/push-tokens", status_code=204)
+def delete_my_push_tokens(user=Depends(jwt_subject)):
+    execute("DELETE FROM push_tokens WHERE user_id=:user", {"user": user["id"]})
 
 
 @app.exception_handler(HTTPException)

@@ -5,6 +5,8 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'driver_home_page.dart';
@@ -22,6 +24,104 @@ const String mapAttribution = String.fromEnvironment(
   defaultValue: '© OpenStreetMap contributors',
 );
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
+
+class PushNotifications {
+  static const _apiKey = String.fromEnvironment('FIREBASE_API_KEY');
+  static const _appId = String.fromEnvironment('FIREBASE_APP_ID');
+  static const _senderId =
+      String.fromEnvironment('FIREBASE_MESSAGING_SENDER_ID');
+  static const _projectId = String.fromEnvironment('FIREBASE_PROJECT_ID');
+  static bool _initialized = false;
+  static bool _listening = false;
+
+  static bool get configured =>
+      _apiKey.isNotEmpty &&
+      _appId.isNotEmpty &&
+      _senderId.isNotEmpty &&
+      _projectId.isNotEmpty;
+
+  static Future<bool> _initialize() async {
+    if (!configured) return false;
+    if (!_initialized) {
+      try {
+        await Firebase.initializeApp(
+          options: FirebaseOptions(
+            apiKey: _apiKey,
+            appId: _appId,
+            messagingSenderId: _senderId,
+            projectId: _projectId,
+          ),
+        );
+        _initialized = true;
+      } catch (_) {
+        return false;
+      }
+    }
+    _installMessageListeners();
+    return true;
+  }
+
+  static void _installMessageListeners() {
+    if (_listening) return;
+    _listening = true;
+    FirebaseMessaging.instance.onTokenRefresh.listen((token) {
+      unawaited(_saveToken(token));
+    }, onError: (_) {});
+    FirebaseMessaging.onMessage.listen((message) {
+      final context = appNavigatorKey.currentContext;
+      if (context == null) return;
+      final title = message.notification?.title ?? 'RideApp update';
+      final body = message.notification?.body ?? '';
+      // This Firebase stream callback is synchronous and reads the current navigator context.
+      // ignore: use_build_context_synchronously
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+            SnackBar(content: Text(body.isEmpty ? title : '$title: $body')));
+    }, onError: (_) {});
+  }
+
+  static Future<void> registerDevice() async {
+    if (!await _initialize()) return;
+    try {
+      await FirebaseMessaging.instance.requestPermission();
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token != null && token.isNotEmpty) await _saveToken(token);
+    } catch (_) {
+      // Push is optional; a missing Firebase setup must not block sign-in.
+    }
+  }
+
+  static Future<void> _saveToken(String token) async {
+    final accessToken = await Session.token();
+    if (accessToken == null) return;
+    try {
+      await Api.request(
+        'POST',
+        '/push-tokens?${Uri(queryParameters: {
+              'token': token,
+              'platform': 'android'
+            }).query}',
+        token: accessToken,
+      );
+    } catch (_) {
+      // Retried on the next app start or FCM token refresh.
+    }
+  }
+
+  static Future<void> unregisterDevice() async {
+    final accessToken = await Session.token();
+    if (accessToken == null) return;
+    try {
+      await Api.request('DELETE', '/push-tokens', token: accessToken);
+    } catch (_) {}
+    if (await _initialize()) {
+      try {
+        await FirebaseMessaging.instance.deleteToken();
+      } catch (_) {}
+    }
+  }
+}
 
 void main() => runApp(const RideApp());
 
@@ -138,6 +238,7 @@ class Session {
   }
 
   static Future<void> clear() async {
+    unawaited(PushNotifications.unregisterDevice());
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('user');
     await _secureStorage.delete(key: _tokenKey);
@@ -254,6 +355,7 @@ class _SplashGateState extends State<SplashGate> {
     await Future.delayed(const Duration(milliseconds: 500));
     final user = await Session.user();
     if (!mounted) return;
+    if (user != null) unawaited(PushNotifications.registerDevice());
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
@@ -335,6 +437,7 @@ class _LoginPageState extends State<LoginPage> {
       );
       final user = Map<String, dynamic>.from(result['user']);
       await Session.save(user, result['token'].toString());
+      unawaited(PushNotifications.registerDevice());
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
@@ -489,6 +592,7 @@ class _RegisterPageState extends State<RegisterPage> {
       final user = Map<String, dynamic>.from(data['user']);
       final token = data['token'].toString();
       await Session.save(user, token);
+      unawaited(PushNotifications.registerDevice());
       if (role == 'driver') {
         try {
           await Api.request('POST', '/my-vehicle', token: token, body: {
