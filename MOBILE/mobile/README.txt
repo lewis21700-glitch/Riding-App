@@ -17,6 +17,7 @@ ANDROID:
 - INTERNET permission is included.
 - Cleartext HTTP is enabled for the local development backend.
 - The emulator uses http://10.0.2.2:3000/api to reach the Windows host at localhost:3000.
+- During an active trip, driver GPS is shared with the passenger and an ongoing Android notification explains that sharing continues while RideApp is in the background. Sharing stops when the trip ends; location is not collected for background tracking outside an active trip.
 
 BACKEND:
 Sprint 3 booking requires matching backend endpoints:

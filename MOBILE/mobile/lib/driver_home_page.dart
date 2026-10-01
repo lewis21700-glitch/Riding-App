@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'main.dart' show Api, NotificationsPage, Session;
@@ -23,11 +24,13 @@ class _DriverHomePageState extends State<DriverHomePage>
   bool loading = true;
   bool updating = false;
   String? error;
-  Timer? locationTimer;
+  StreamSubscription<Position>? locationSubscription;
   Timer? rideRefreshTimer;
   bool requestActive = false;
   bool locationRequestActive = false;
+  bool locationPermissionBlocked = false;
   int? locationRideId;
+  int locationGeneration = 0;
 
   @override
   void initState() {
@@ -42,14 +45,12 @@ class _DriverHomePageState extends State<DriverHomePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      locationPermissionBlocked = false;
       _startRideRefresh();
       load(showLoading: false);
     } else {
       rideRefreshTimer?.cancel();
       rideRefreshTimer = null;
-      locationTimer?.cancel();
-      locationTimer = null;
-      locationRideId = null;
     }
   }
 
@@ -100,7 +101,7 @@ class _DriverHomePageState extends State<DriverHomePage>
             : [];
         if (showLoading) loading = false;
       });
-      _syncLocationTimer();
+      unawaited(_syncLocationStream());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -129,7 +130,7 @@ class _DriverHomePageState extends State<DriverHomePage>
           body: {'availability': online ? 'online' : 'offline'}, token: token);
       if (!mounted) return;
       setState(() => availability = online ? 'available' : 'offline');
-      _syncLocationTimer();
+      unawaited(_syncLocationStream());
     } catch (e) {
       _message(_friendly(e));
     } finally {
@@ -258,43 +259,79 @@ class _DriverHomePageState extends State<DriverHomePage>
     }
   }
 
-  void _syncLocationTimer() {
+  Future<void> _syncLocationStream() async {
     final activeRides = rides.where((ride) => ride['status'] == 'ongoing');
     final active = activeRides.isEmpty ? null : activeRides.first;
     if (active == null || availability != 'on_ride') {
-      locationTimer?.cancel();
-      locationTimer = null;
-      locationRideId = null;
+      await _stopLocationStream();
       return;
     }
     final rideId = active['id'] as int;
-    if (locationRideId == rideId && locationTimer != null) return;
-    locationTimer?.cancel();
+    if (locationRideId == rideId && locationSubscription != null) return;
+    if (locationPermissionBlocked) return;
+
+    final generation = ++locationGeneration;
+    final previousSubscription = locationSubscription;
+    locationSubscription = null;
     locationRideId = rideId;
-    locationTimer = Timer.periodic(
-        const Duration(seconds: 10), (_) => _sendLocation(rideId));
-    _sendLocation(rideId);
+    await previousSubscription?.cancel();
+    if (!await Geolocator.isLocationServiceEnabled()) return;
+
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (!mounted || generation != locationGeneration) return;
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      locationPermissionBlocked = true;
+      if (mounted) {
+        _message(
+            'Allow location access to share your trip with the passenger.');
+      }
+      return;
+    }
+    final settings = defaultTargetPlatform == TargetPlatform.android
+        ? AndroidSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 10,
+            intervalDuration: const Duration(seconds: 10),
+            foregroundNotificationConfig: const ForegroundNotificationConfig(
+              notificationTitle: 'RideApp trip in progress',
+              notificationText:
+                  'Your location is being shared with your passenger.',
+              notificationChannelName: 'Active trip location',
+              setOngoing: true,
+            ),
+          )
+        : const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 10,
+            timeLimit: Duration(minutes: 2),
+          );
+    locationSubscription = Geolocator.getPositionStream(
+      locationSettings: settings,
+    ).listen(
+      (position) => unawaited(_sendLocation(rideId, position)),
+      onError: (Object _) {
+        locationSubscription = null;
+      },
+    );
   }
 
-  Future<void> _sendLocation(int rideId) async {
+  Future<void> _stopLocationStream() async {
+    locationGeneration++;
+    locationRideId = null;
+    final subscription = locationSubscription;
+    locationSubscription = null;
+    await subscription?.cancel();
+  }
+
+  Future<void> _sendLocation(int rideId, Position position) async {
     if (locationRequestActive) return;
     locationRequestActive = true;
     try {
-      if (!await Geolocator.isLocationServiceEnabled()) return;
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        return;
-      }
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 15),
-        ),
-      );
+      if (locationRideId != rideId) return;
       final token = await _token;
       if (token == null) return;
       await Api.request('POST', '/driver-location?ride_id=$rideId',
@@ -321,7 +358,7 @@ class _DriverHomePageState extends State<DriverHomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     rideRefreshTimer?.cancel();
-    locationTimer?.cancel();
+    unawaited(_stopLocationStream());
     super.dispose();
   }
 
