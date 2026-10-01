@@ -1,15 +1,25 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'driver_home_page.dart';
 
 const String apiBase = String.fromEnvironment(
   'API_BASE_URL',
   defaultValue: 'http://10.0.2.2:3000/api',
+);
+const String mapTileUrl = String.fromEnvironment(
+  'MAP_TILE_URL',
+  defaultValue: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+);
+const String mapAttribution = String.fromEnvironment(
+  'MAP_ATTRIBUTION',
+  defaultValue: '© OpenStreetMap contributors',
 );
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
@@ -1501,9 +1511,86 @@ class _TrackRideSheet extends StatefulWidget {
 }
 
 class _TrackRideSheetState extends State<_TrackRideSheet> {
+  final MapController _mapController = MapController();
   Map<String, dynamic>? tracking;
   String? error;
   Timer? timer;
+  bool _mapReady = false;
+  bool _didFocusDriver = false;
+
+  LatLng? _pointFrom(dynamic value) {
+    if (value is! Map) return null;
+    final latitude = double.tryParse(value['latitude']?.toString() ?? '');
+    final longitude = double.tryParse(value['longitude']?.toString() ?? '');
+    if (latitude == null ||
+        longitude == null ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude < -180 ||
+        longitude > 180) {
+      return null;
+    }
+    return LatLng(latitude, longitude);
+  }
+
+  LatLng? get _driverPoint => _pointFrom(tracking?['location']);
+  LatLng? get _pickupPoint => _pointFrom(tracking?['pickup']);
+  LatLng? get _destinationPoint => _pointFrom(tracking?['destination']);
+
+  List<LatLng> get _routePoints => [
+        if (_pickupPoint != null) _pickupPoint!,
+        if (_driverPoint != null) _driverPoint!,
+        if (_destinationPoint != null) _destinationPoint!,
+      ];
+
+  void _focusDriverIfAvailable() {
+    if (!_mapReady || _didFocusDriver || _driverPoint == null) return;
+    _didFocusDriver = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _mapController.fitCamera(
+        CameraFit.coordinates(
+          coordinates: _routePoints,
+          padding: const EdgeInsets.all(48),
+          maxZoom: 16,
+        ),
+      );
+    });
+  }
+
+  void _recenterMap() {
+    final points = _routePoints;
+    if (points.isEmpty) return;
+    _mapController.fitCamera(
+      CameraFit.coordinates(
+        coordinates: points,
+        padding: const EdgeInsets.all(48),
+        maxZoom: 16,
+      ),
+    );
+  }
+
+  Widget _mapMarker(String label, IconData icon, Color color) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: const [
+                BoxShadow(color: Colors.black26, blurRadius: 5),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              child: Text(label,
+                  style: const TextStyle(
+                      fontSize: 11, fontWeight: FontWeight.w700)),
+            ),
+          ),
+          Icon(icon, color: color, size: 34),
+        ],
+      );
 
   @override
   void initState() {
@@ -1523,6 +1610,7 @@ class _TrackRideSheetState extends State<_TrackRideSheet> {
         tracking = Map<String, dynamic>.from(data as Map);
         error = null;
       });
+      _focusDriverIfAvailable();
     } catch (e) {
       if (mounted) {
         setState(() => error = e.toString().replaceFirst('Exception: ', ''));
@@ -1539,44 +1627,155 @@ class _TrackRideSheetState extends State<_TrackRideSheet> {
   @override
   Widget build(BuildContext context) {
     final location = tracking?['location'];
+    final pickup = tracking?['pickup'];
+    final destination = tracking?['destination'];
+    final driverPoint = _driverPoint;
+    final pickupPoint = _pickupPoint;
+    final destinationPoint = _destinationPoint;
+    final initialCenter = driverPoint ??
+        pickupPoint ??
+        destinationPoint ??
+        const LatLng(11.5564, 104.9282); // Phnom Penh
     return SafeArea(
         child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Ride #${widget.rideId}',
-                    style: const TextStyle(
-                        fontSize: 21, fontWeight: FontWeight.w800)),
-                const SizedBox(height: 8),
-                Text('Status: ${tracking?['status'] ?? 'loading'}',
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Row(children: [
+                Expanded(
+                  child: Text('Ride #${widget.rideId}',
+                      style: const TextStyle(
+                          fontSize: 21, fontWeight: FontWeight.w800)),
+                ),
+                IconButton(
+                    tooltip: 'Refresh tracking',
+                    onPressed: refresh,
+                    icon: const Icon(Icons.refresh)),
+              ]),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Status: ${tracking?['status'] ?? 'loading'}',
                     style: const TextStyle(color: Color(0xFF6B7280))),
-                const SizedBox(height: 12),
-                if (location is Map) ...[
-                  const Text('Driver location',
-                      style: TextStyle(fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 4),
-                  Text('${location['latitude']}, ${location['longitude']}'),
-                  Text('Updated ${location['updated_at'] ?? 'just now'}',
-                      style: const TextStyle(color: Color(0xFF6B7280))),
-                ] else
-                  const Text(
-                      'Waiting for the driver to share their live location.'),
-                if (error != null)
-                  Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(error!,
-                          style: const TextStyle(color: Colors.red))),
-                const SizedBox(height: 12),
-                Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton.icon(
-                        onPressed: refresh,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Refresh now'))),
-              ],
-            )));
+              ),
+              const SizedBox(height: 12),
+              if (_routePoints.isNotEmpty)
+                SizedBox(
+                  height: 280,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Stack(children: [
+                      FlutterMap(
+                        mapController: _mapController,
+                        options: MapOptions(
+                          initialCenter: initialCenter,
+                          initialZoom: driverPoint == null ? 14 : 15,
+                          onMapReady: () {
+                            _mapReady = true;
+                            _focusDriverIfAvailable();
+                          },
+                        ),
+                        children: [
+                          TileLayer(
+                            urlTemplate: mapTileUrl,
+                            userAgentPackageName: 'RideApp/1.0',
+                            maxNativeZoom: 19,
+                          ),
+                          MarkerLayer(markers: [
+                            if (pickupPoint != null)
+                              Marker(
+                                point: pickupPoint,
+                                width: 88,
+                                height: 58,
+                                alignment: Alignment.topCenter,
+                                child: _mapMarker('Pickup', Icons.trip_origin,
+                                    const Color(0xFF16A34A)),
+                              ),
+                            if (destinationPoint != null)
+                              Marker(
+                                point: destinationPoint,
+                                width: 100,
+                                height: 58,
+                                alignment: Alignment.topCenter,
+                                child: _mapMarker('Destination', Icons.flag,
+                                    const Color(0xFFDC2626)),
+                              ),
+                            if (driverPoint != null)
+                              Marker(
+                                point: driverPoint,
+                                width: 82,
+                                height: 58,
+                                alignment: Alignment.topCenter,
+                                child: _mapMarker(
+                                    'Driver',
+                                    Icons.local_taxi_rounded,
+                                    const Color(0xFF2563EB)),
+                              ),
+                          ]),
+                          RichAttributionWidget(
+                            attributions: [
+                              TextSourceAttribution(mapAttribution),
+                            ],
+                          ),
+                        ],
+                      ),
+                      Positioned(
+                        right: 10,
+                        top: 10,
+                        child: FloatingActionButton.small(
+                          heroTag: 'recenter-ride-${widget.rideId}',
+                          tooltip: 'Fit ride locations',
+                          onPressed: _recenterMap,
+                          child: const Icon(Icons.my_location),
+                        ),
+                      ),
+                    ]),
+                  ),
+                )
+              else
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 28),
+                  child:
+                      Text('Waiting for the driver to share their location.'),
+                ),
+              if (location is Map)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Driver location updated ${location['updated_at'] ?? 'just now'}',
+                      style: const TextStyle(color: Color(0xFF6B7280)),
+                    ),
+                  ),
+                ),
+              if (pickup is Map &&
+                  (pickup['label'] ?? '').toString().isNotEmpty)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading:
+                      const Icon(Icons.trip_origin, color: Color(0xFF16A34A)),
+                  title: Text(pickup['label'].toString()),
+                  subtitle: const Text('Pickup'),
+                ),
+              if (destination is Map &&
+                  (destination['label'] ?? '').toString().isNotEmpty)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.flag, color: Color(0xFFDC2626)),
+                  title: Text(destination['label'].toString()),
+                  subtitle: const Text('Destination'),
+                ),
+              if (error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child:
+                        Text(error!, style: const TextStyle(color: Colors.red)),
+                  ),
+                ),
+            ])));
   }
 }
 

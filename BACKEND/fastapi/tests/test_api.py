@@ -252,6 +252,10 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
                        json={"latitude": 11.56, "longitude": 104.92}).status_code == 200
     tracking = client.get(f"/api/rides/{ride_id}/track", headers=rider_auth)
     assert tracking.status_code == 200 and tracking.json()["location"]["latitude"] == 11.56
+    assert tracking.json()["pickup"]["latitude"] == 11.56
+    assert tracking.json()["pickup"]["longitude"] == 104.92
+    assert tracking.json()["destination"]["latitude"] == 11.57
+    assert tracking.json()["destination"]["longitude"] == 104.93
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,
                       json={"status": "completed"}).status_code == 200
     assert client.post("/api/payments", headers=rider_auth,

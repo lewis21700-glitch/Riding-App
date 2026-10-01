@@ -171,6 +171,14 @@ def main() -> int:
         tracking = client.get(f"/api/rides/{ride_id}/track", headers=passenger_headers)
         require(tracking.status_code == 200 and tracking.json().get("location") is not None,
                 f"Passenger tracking failed: {tracking.text}")
+        tracked_ride = tracking.json()
+        require(
+            tracked_ride.get("pickup", {}).get("latitude") == 11.56
+            and tracked_ride.get("pickup", {}).get("longitude") == 104.92
+            and tracked_ride.get("destination", {}).get("latitude") == 11.57
+            and tracked_ride.get("destination", {}).get("longitude") == 104.93,
+            "Passenger tracking response is missing pickup/destination map coordinates",
+        )
         require(client.put(f"/api/driver-rides/{ride_id}", headers=driver_headers,
                            json={"status": "completed"}).status_code == 200,
                 "Trip completion failed")

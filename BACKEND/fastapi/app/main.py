@@ -866,7 +866,12 @@ def update_driver_location(body: LocationBody, ride_id: int = Query(gt=0),
 
 @app.get("/api/rides/{ride_id}/track")
 def track_ride(ride_id: int, user=Depends(jwt_subject)):
-    found = rows("SELECT id,rider_id,driver_id,status FROM rides WHERE id=:id", {"id": ride_id})
+    found = rows(
+        "SELECT id,rider_id,driver_id,status,pickup_location,destination,"
+        "pickup_lat,pickup_lng,destination_lat,destination_lng "
+        "FROM rides WHERE id=:id",
+        {"id": ride_id},
+    )
     if not found:
         fail(404, "Ride not found")
     ride = found[0]
@@ -879,8 +884,21 @@ def track_ride(ride_id: int, user=Depends(jwt_subject)):
     location = rows("SELECT latitude,longitude,heading,updated_at FROM driver_locations "
                     "WHERE driver_id=:driver AND ride_id=:ride",
                     {"driver": ride["driver_id"], "ride": ride_id}) if ride["driver_id"] else []
-    return {"ride_id": ride_id, "status": ride["status"],
-            "location": location[0] if location else None}
+    return {
+        "ride_id": ride_id,
+        "status": ride["status"],
+        "location": location[0] if location else None,
+        "pickup": {
+            "label": ride["pickup_location"],
+            "latitude": ride["pickup_lat"],
+            "longitude": ride["pickup_lng"],
+        },
+        "destination": {
+            "label": ride["destination"],
+            "latitude": ride["destination_lat"],
+            "longitude": ride["destination_lng"],
+        },
+    }
 
 
 @app.get("/api/notifications")
