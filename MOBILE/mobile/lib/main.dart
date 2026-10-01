@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'driver_home_page.dart';
 
@@ -97,10 +98,14 @@ class Api {
 }
 
 class Session {
+  static const _secureStorage = FlutterSecureStorage();
+  static const _tokenKey = 'token';
+
   static Future<void> save(Map<String, dynamic> user, String token) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('user', jsonEncode(user));
-    await prefs.setString('token', token);
+    await _secureStorage.write(key: _tokenKey, value: token);
+    await prefs.remove(_tokenKey);
   }
 
   static Future<Map<String, dynamic>?> user() async {
@@ -110,14 +115,23 @@ class Session {
   }
 
   static Future<String?> token() async {
+    final secureToken = await _secureStorage.read(key: _tokenKey);
+    if (secureToken != null) return secureToken;
+
+    // Upgrade sessions saved by earlier app versions without signing users out.
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('token');
+    final legacyToken = prefs.getString(_tokenKey);
+    if (legacyToken == null) return null;
+    await _secureStorage.write(key: _tokenKey, value: legacyToken);
+    await prefs.remove(_tokenKey);
+    return legacyToken;
   }
 
   static Future<void> clear() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('user');
-    await prefs.remove('token');
+    await _secureStorage.delete(key: _tokenKey);
+    await prefs.remove(_tokenKey);
     await prefs.remove('chatgpt_account');
     await prefs.remove('chatgpt_api_key');
   }
