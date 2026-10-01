@@ -15,7 +15,8 @@ class DriverHomePage extends StatefulWidget {
   State<DriverHomePage> createState() => _DriverHomePageState();
 }
 
-class _DriverHomePageState extends State<DriverHomePage> {
+class _DriverHomePageState extends State<DriverHomePage>
+    with WidgetsBindingObserver {
   String availability = 'offline';
   Map<String, dynamic>? vehicle;
   List<Map<String, dynamic>> rides = [];
@@ -23,13 +24,39 @@ class _DriverHomePageState extends State<DriverHomePage> {
   bool updating = false;
   String? error;
   Timer? locationTimer;
+  Timer? rideRefreshTimer;
+  bool requestActive = false;
+  int? locationRideId;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     availability =
         _normalizeAvailability(widget.user['availability']?.toString());
     load();
+    _startRideRefresh();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _startRideRefresh();
+      load(showLoading: false);
+    } else {
+      rideRefreshTimer?.cancel();
+      rideRefreshTimer = null;
+      locationTimer?.cancel();
+      locationTimer = null;
+      locationRideId = null;
+    }
+  }
+
+  void _startRideRefresh() {
+    rideRefreshTimer?.cancel();
+    rideRefreshTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      if (!loading && !requestActive) load(showLoading: false);
+    });
   }
 
   String _normalizeAvailability(String? value) => switch (value) {
@@ -40,8 +67,10 @@ class _DriverHomePageState extends State<DriverHomePage> {
 
   Future<String?> get _token => Session.token();
 
-  Future<void> load() async {
-    if (mounted) {
+  Future<void> load({bool showLoading = true}) async {
+    if (requestActive) return;
+    requestActive = true;
+    if (showLoading && mounted) {
       setState(() {
         loading = true;
         error = null;
@@ -62,20 +91,23 @@ class _DriverHomePageState extends State<DriverHomePage> {
       setState(() {
         availability =
             _normalizeAvailability(profile['availability']?.toString());
+        error = null;
         vehicle =
             vehicleData is Map ? Map<String, dynamic>.from(vehicleData) : null;
         rides = rideData is List
             ? rideData.map((item) => Map<String, dynamic>.from(item)).toList()
             : [];
-        loading = false;
+        if (showLoading) loading = false;
       });
       _syncLocationTimer();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         error = _friendly(e);
-        loading = false;
+        if (showLoading) loading = false;
       });
+    } finally {
+      requestActive = false;
     }
   }
 
@@ -226,13 +258,21 @@ class _DriverHomePageState extends State<DriverHomePage> {
   }
 
   void _syncLocationTimer() {
-    locationTimer?.cancel();
     final activeRides = rides.where((ride) => ride['status'] == 'ongoing');
     final active = activeRides.isEmpty ? null : activeRides.first;
-    if (active == null || availability != 'on_ride') return;
+    if (active == null || availability != 'on_ride') {
+      locationTimer?.cancel();
+      locationTimer = null;
+      locationRideId = null;
+      return;
+    }
+    final rideId = active['id'] as int;
+    if (locationRideId == rideId && locationTimer != null) return;
+    locationTimer?.cancel();
+    locationRideId = rideId;
     locationTimer = Timer.periodic(
-        const Duration(seconds: 10), (_) => _sendLocation(active['id'] as int));
-    _sendLocation(active['id'] as int);
+        const Duration(seconds: 10), (_) => _sendLocation(rideId));
+    _sendLocation(rideId);
   }
 
   Future<void> _sendLocation(int rideId) async {
@@ -269,6 +309,8 @@ class _DriverHomePageState extends State<DriverHomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    rideRefreshTimer?.cancel();
     locationTimer?.cancel();
     super.dispose();
   }

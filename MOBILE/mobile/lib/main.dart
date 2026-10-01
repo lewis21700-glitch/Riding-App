@@ -519,30 +519,60 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int tab = 0;
   Map<String, dynamic> user = {};
   List<Map<String, dynamic>> rides = [];
   bool loading = true;
+  bool _requestActive = false;
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     load();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        _load(showLoading: false);
+      }
+    });
   }
 
-  Future<void> load() async {
-    user = await Session.user() ?? {};
-    final token = await Session.token();
-    if (token != null) {
-      try {
-        final data = await Api.request('GET', '/my-rides', token: token);
-        rides = ((data['rides'] ?? []) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-      } catch (_) {}
+  Future<void> load() => _load(showLoading: true);
+
+  Future<void> _load({required bool showLoading}) async {
+    if (_requestActive) return;
+    _requestActive = true;
+    if (showLoading && mounted) setState(() => loading = true);
+    try {
+      final nextUser = await Session.user() ?? {};
+      final token = await Session.token();
+      List<Map<String, dynamic>>? nextRides;
+      if (token != null) {
+        try {
+          final data = await Api.request('GET', '/my-rides', token: token);
+          nextRides = ((data['rides'] ?? []) as List)
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
+        } catch (_) {
+          // Keep the last successful ride list while the API is unavailable.
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        user = nextUser;
+        if (nextRides != null) rides = nextRides;
+      });
+    } finally {
+      _requestActive = false;
+      if (mounted && loading) setState(() => loading = false);
     }
-    if (mounted) setState(() => loading = false);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _load(showLoading: false);
   }
 
   Future<void> logout() async {
@@ -553,6 +583,13 @@ class _HomePageState extends State<HomePage> {
       MaterialPageRoute(builder: (_) => const LoginPage()),
       (_) => false,
     );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _refreshTimer?.cancel();
+    super.dispose();
   }
 
   @override
