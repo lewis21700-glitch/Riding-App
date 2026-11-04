@@ -1,14 +1,24 @@
 {
   "folders": [
     {
+      "name": "Mobile (Flutter)",
       "path": "MOBILE/mobile"
+    },
+    {
+      "name": "Backend (FastAPI)",
+      "path": "BACKEND/fastapi"
+    },
+    {
+      "name": "Admin Portal (React)",
+      "path": "admin"
     }
   ],
   "settings": {
-    "dart.projectSearchDepth": 1,
     "files.exclude": {
       "**/.dart_tool": true,
-      "**/build": true
+      "**/build": true,
+      "**/.pytest_cache": true,
+      "**/__pycache__": true
     }
   }
 }

@@ -4,9 +4,12 @@ RideApp is a ride-booking project with a Flutter Android client, a FastAPI servi
 
 ## Project layout
 
-- `MOBILE/mobile` — Flutter passenger and driver app. Open `RideApp.code-workspace` in VS Code to keep Dart analysis scoped to the active app rather than the archived mobile copies.
-- `BACKEND/fastapi` — FastAPI API, MySQL schema, admin bootstrap script, and API tests. See its [setup guide](BACKEND/fastapi/README.md).
-- `admin` — React/Vite admin site. Its API origin is configured with `VITE_API_URL` (see `admin/.env.example`).
+- `MOBILE/mobile` — Flutter passenger and driver application.
+- `BACKEND/fastapi` — FastAPI REST API, MySQL database migrations, admin bootstrap, and test suite. See its [setup guide](BACKEND/fastapi/README.md).
+- `admin` — React/Vite admin dashboard portal for real-time dispatch, income tracking, driver payouts, and fleet management.
+- `docs` — project overview, sprint coverage, and project documentation.
+- `MOBILE/archive` — preserved older Flutter snapshots; use `MOBILE/mobile` for the current app.
+- `ARCHIVE` — preserved auxiliary repository metadata.
 
 ## Run locally
 
@@ -43,4 +46,4 @@ The Android Gradle configuration supports the Java 25 runtime bundled with curre
 
 ## Current integration scope
 
-Local ride booking, driver matching/state transitions, tracking, cash payment records, and ride history are implemented across the API and mobile app. Card processing and actual push notification delivery require provider credentials and are not enabled yet. See the backend guide for the local fare and geocoding behavior and production security settings.
+Local ride booking, driver matching/state transitions, tracking, cash payments, confirmed KHQR payments, receipts, ratings, and ride history are implemented across the API and mobile app. Push delivery and KHQR payment confirmation require Firebase and Bakong merchant credentials, respectively; both integrations remain disabled until configured. The project targets dynamic USD KHQR rather than card processing, since Stripe does not currently support Cambodia-based merchant accounts. See the backend guide for provider setup, local fare/geocoding behavior, and production security settings.

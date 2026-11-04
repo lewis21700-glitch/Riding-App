@@ -28,4 +28,4 @@ POST /api/fare/estimate
 POST /api/rides
 GET  /api/my-rides?rider_id=ID
 
-Do not delete your old mobile_backup folder until the new project is tested.
+The older Flutter snapshots are preserved under `archive/`. The current runnable app is this folder.

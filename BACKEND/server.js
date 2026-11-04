@@ -64,7 +64,9 @@ async function ensureSchema() {
   await ensureColumn("rides", "distance_km", "DECIMAL(10,2) NULL AFTER ride_type");
   await ensureColumn("rides", "pickup_lat", "DECIMAL(10,7) NULL AFTER distance_km");
   await ensureColumn("rides", "pickup_lng", "DECIMAL(10,7) NULL AFTER pickup_lat");
+  await ensureColumn("rides", "currency", "CHAR(3) NOT NULL DEFAULT 'USD' AFTER fare");
   await ensureColumn("payments", "payment_method", "VARCHAR(30) NULL AFTER amount");
+  await ensureColumn("payments", "currency", "CHAR(3) NOT NULL DEFAULT 'USD' AFTER amount");
   await query("ALTER TABLE rides MODIFY fare DECIMAL(10,2) NULL");
 
   await query(`CREATE TABLE IF NOT EXISTS notifications (
@@ -98,6 +100,42 @@ app.post("/api/login", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Login failed" });
+  }
+});
+
+// Public sign-up is for passengers only. Driver accounts are provisioned by admins.
+app.post("/api/register", async (req, res) => {
+  const { name, email, phone, password } = req.body;
+  if (!name?.trim() || !email?.trim() || !password) {
+    return res.status(400).json({ error: "Name, email and password are required" });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters" });
+  }
+  try {
+    const normalizedEmail = email.trim().toLowerCase();
+    const result = await query(
+      `INSERT INTO users(name,email,phone,password,role,availability) VALUES(?,?,?,?, 'rider',NULL)`,
+      [name.trim(), normalizedEmail, phone?.trim() || "", password]
+    );
+    const user = {
+      id: result.insertId,
+      name: name.trim(),
+      email: normalizedEmail,
+      phone: phone?.trim() || "",
+      role: "rider",
+    };
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: "8h" }
+    );
+    res.status(201).json({ message: "Passenger account created", token, user });
+  } catch (err) {
+    console.error(err);
+    res.status(err.code === "ER_DUP_ENTRY" ? 409 : 500).json({
+      error: err.code === "ER_DUP_ENTRY" ? "Email already exists" : "Registration failed",
+    });
   }
 });
 
@@ -191,21 +229,93 @@ app.put("/api/vehicles/:id", auth, adminOnly, async (req,res)=>{
 app.delete("/api/vehicles/:id", auth, adminOnly, async (req,res)=>{try{const r=await query("DELETE FROM vehicles WHERE id=?",[Number(req.params.id)]);if(!r.affectedRows)return res.status(404).json({error:"Vehicle not found"});res.json({message:"Vehicle deleted successfully"});}catch(err){console.error(err);res.status(500).json({error:"Failed to delete vehicle"});}});
 
 // =========================
-// FARE ENGINE - SPRINT 3
+// MAP SEARCH, ROUTING AND FARE ESTIMATES
 // =========================
-const FARE_RULES={
-  "Car": {base:1.50, perKm:0.75, minimum:2.50},
-  "Tuk Tuk": {base:1.00, perKm:0.55, minimum:2.00},
-  "Motorbike": {base:0.75, perKm:0.40, minimum:1.50},
-  "Direct Ride": {base:0, perKm:0, minimum:0},
+const VEHICLE_TYPES = {
+  Rickshaw: { passengers: 3, minimum: 3000 },
+  Rormork: { passengers: 4, minimum: 4000 },
+  Economy: { passengers: 4, minimum: 4300 },
+  Comfort: { passengers: 4, minimum: 5500 },
+  "Standard XL": { passengers: 6, minimum: 7500 },
 };
-function calculateFare(type,distance){const rule=FARE_RULES[type]||FARE_RULES.Car;return Math.max(rule.minimum,rule.base+rule.perKm*distance);}
+function calculateFare(type, _distanceKm) {
+  const vehicle = VEHICLE_TYPES[type];
+  if (!vehicle) throw new Error("Unsupported vehicle type");
+  // Use the exact per-vehicle fares shown in the supplied PassApp reference.
+  return vehicle.minimum;
+}
 
-app.post("/api/fare/estimate", auth, riderOnly, async (req,res)=>{
-  const type=String(req.body.ride_type||"Car");const distance=Number(req.body.distance_km);
-  if(type==="Direct Ride")return res.json({ride_type:type,estimated_fare:null,direct:true,message:"Final fare will be set when the ride is completed."});
-  if(!Number.isFinite(distance)||distance<0)return res.status(400).json({error:"A valid distance in km is required"});
-  res.json({ride_type:type,distance_km:distance,estimated_fare:Number(calculateFare(type,distance).toFixed(2))});
+let nextNominatimRequestAt = 0;
+async function nominatim(url) {
+  const delay = Math.max(0, nextNominatimRequestAt - Date.now());
+  nextNominatimRequestAt = Date.now() + delay + 1000;
+  if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+  const response = await fetch(url, {
+    headers: { "User-Agent": "RideApp/1.0 (Cambodia ride-hailing demo)" },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!response.ok) throw new Error(`Place search returned ${response.status}`);
+  return response.json();
+}
+
+app.get("/api/places/search", async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (q.length < 3) return res.json({ places: [] });
+  try {
+    const params = new URLSearchParams({
+      format: "jsonv2", addressdetails: "1", limit: "6", countrycodes: "kh", q,
+    });
+    const results = await nominatim(`https://nominatim.openstreetmap.org/search?${params}`);
+    res.json({ places: results.map((place) => ({
+      label: place.display_name,
+      latitude: Number(place.lat),
+      longitude: Number(place.lon),
+    })) });
+  } catch (err) {
+    console.error("Place search failed:", err.message);
+    res.status(502).json({ error: "Place search is temporarily unavailable" });
+  }
+});
+
+app.get("/api/places/reverse", async (req, res) => {
+  const lat = Number(req.query.lat), lon = Number(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return res.status(400).json({ error: "Valid coordinates are required" });
+  try {
+    const params = new URLSearchParams({ format: "jsonv2", lat: String(lat), lon: String(lon), zoom: "18" });
+    const place = await nominatim(`https://nominatim.openstreetmap.org/reverse?${params}`);
+    res.json({ label: place.display_name || `${lat.toFixed(5)}, ${lon.toFixed(5)}` });
+  } catch (err) {
+    console.error("Reverse geocoding failed:", err.message);
+    res.status(502).json({ error: "Address lookup is temporarily unavailable" });
+  }
+});
+
+async function getRoadRoute(pickupLat, pickupLon, destinationLat, destinationLon) {
+  const values = [pickupLat, pickupLon, destinationLat, destinationLon].map(Number);
+  if (values.some((value) => !Number.isFinite(value))) throw new Error("Select both places on the map or from search results");
+  const [lat1, lon1, lat2, lon2] = values;
+  const url = `https://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&steps=false`;
+  const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`Route service returned ${response.status}`);
+  const data = await response.json();
+  if (data.code !== "Ok" || !data.routes?.length) throw new Error("No driving route found between those places");
+  const route = data.routes[0];
+  return {
+    distance_km: route.distance / 1000,
+    estimated_duration_minutes: route.duration / 60,
+    route_points: route.geometry.coordinates.map(([longitude, latitude]) => ({ latitude, longitude })),
+  };
+}
+
+app.post("/api/fare/estimate", auth, riderOnly, async (req, res) => {
+  const type = String(req.body.ride_type || "");
+  if (!VEHICLE_TYPES[type]) return res.status(400).json({ error: "Select a supported vehicle type" });
+  try {
+    const route = await getRoadRoute(req.body.pickup_lat, req.body.pickup_lng, req.body.destination_lat, req.body.destination_lng);
+    res.json({ ride_type: type, currency: "KHR", ...route, estimated_fare: calculateFare(type, route.distance_km) });
+  } catch (err) {
+    res.status(400).json({ error: err.message || "Unable to estimate this route" });
+  }
 });
 
 // =========================
@@ -213,40 +323,43 @@ app.post("/api/fare/estimate", auth, riderOnly, async (req,res)=>{
 // Admin can VIEW only. Ride updates belong to the ride workflow.
 // =========================
 app.get("/api/rides", auth, adminOnly, async (req,res)=>{
-  try{res.json(await query(`SELECT r.id,r.rider_id,rider.name AS rider_name,r.driver_id,driver.name AS driver_name,r.pickup_location,r.destination,r.ride_type,r.distance_km,r.pickup_lat,r.pickup_lng,r.fare,r.status,r.created_at FROM rides r LEFT JOIN users rider ON r.rider_id=rider.id LEFT JOIN users driver ON r.driver_id=driver.id ORDER BY r.id DESC`));}
+  try{res.json(await query(`SELECT r.id,r.rider_id,rider.name AS rider_name,r.driver_id,driver.name AS driver_name,r.pickup_location,r.destination,r.ride_type,r.distance_km,r.pickup_lat,r.pickup_lng,r.fare,r.currency,r.status,r.created_at FROM rides r LEFT JOIN users rider ON r.rider_id=rider.id LEFT JOIN users driver ON r.driver_id=driver.id ORDER BY r.id DESC`));}
   catch(err){console.error(err);res.status(500).json({error:"Failed to get rides"});}
 });
 
 app.post("/api/rides", auth, riderOnly, async (req,res)=>{
-  const {ride_type="Car",pickup_location,destination="",distance_km,pickup_lat,pickup_lng}=req.body;
+  const {ride_type,pickup_location,destination="",pickup_lat,pickup_lng,destination_lat,destination_lng}=req.body;
   if(!pickup_location?.trim())return res.status(400).json({error:"Pickup location is required"});
-  if(ride_type!=="Direct Ride"&&!destination?.trim())return res.status(400).json({error:"Destination is required"});
+  if(!VEHICLE_TYPES[ride_type])return res.status(400).json({error:"Select a supported vehicle type"});
   let fare=null;
-  const distance=distance_km==null||distance_km===""?null:Number(distance_km);
-  if(ride_type!=="Direct Ride"){
-    if(!Number.isFinite(distance)||distance<0)return res.status(400).json({error:"Valid distance is required"});
-    fare=Number(calculateFare(ride_type,distance).toFixed(2));
+  let distance=null;
+  if(destination?.trim()){
+    try {
+      const route=await getRoadRoute(pickup_lat,pickup_lng,destination_lat,destination_lng);
+      distance=Number(route.distance_km.toFixed(2));
+      fare=calculateFare(ride_type,distance);
+    } catch(err) { return res.status(400).json({error:err.message||"Unable to calculate route fare"}); }
   }
   try{
-    const r=await query(`INSERT INTO rides(rider_id,driver_id,pickup_location,destination,ride_type,distance_km,pickup_lat,pickup_lng,fare,status) VALUES(?,NULL,?,?,?,?,?,?,?,?)`,[req.user.id,pickup_location.trim(),destination?.trim()||"",ride_type,distance,pickup_lat??null,pickup_lng??null,fare,"requested"]);
+    const r=await query(`INSERT INTO rides(rider_id,driver_id,pickup_location,destination,ride_type,distance_km,pickup_lat,pickup_lng,fare,currency,status) VALUES(?,NULL,?,?,?,?,?,?,?,?,?)`,[req.user.id,pickup_location.trim(),destination?.trim()||"",ride_type,distance,pickup_lat??null,pickup_lng??null,fare,"KHR","requested"]);
     const drivers=await query(`SELECT id FROM users WHERE role='driver' AND availability='online'`);
     for(const d of drivers) await query(`INSERT INTO notifications(user_id,title,message,type) VALUES(?,?,?,?)`,[d.id,"New ride request",`Ride #${r.insertId} is waiting for a driver.`,"ride"]);
-    res.status(201).json({message:"Ride requested successfully",ride_id:r.insertId,estimated_fare:fare,direct:ride_type==="Direct Ride"});
+    res.status(201).json({message:"Ride requested successfully",ride_id:r.insertId,estimated_fare:fare,direct:!destination?.trim(),currency:"KHR",distance_km:distance});
   }catch(err){console.error(err);res.status(500).json({error:"Failed to create ride"});}
 });
 
 app.get("/api/my-rides", auth, riderOnly, async (req,res)=>{
-  try{res.json(await query(`SELECT r.id,r.pickup_location,r.destination,r.ride_type,r.distance_km,r.fare,r.status,r.created_at,d.name AS driver_name FROM rides r LEFT JOIN users d ON r.driver_id=d.id WHERE r.rider_id=? ORDER BY r.id DESC`,[req.user.id]));}
+  try{res.json(await query(`SELECT r.id,r.rider_id,r.driver_id,r.pickup_location,r.destination,r.ride_type,r.distance_km,r.fare,r.currency,r.status,r.created_at,d.name AS driver_name,EXISTS(SELECT 1 FROM payments p WHERE p.ride_id=r.id AND p.status='paid') AS paid FROM rides r LEFT JOIN users d ON r.driver_id=d.id WHERE r.rider_id=? ORDER BY r.id DESC`,[req.user.id]));}
   catch(err){console.error(err);res.status(500).json({error:"Failed to get your rides"});}
 });
 
 app.get("/api/driver-rides", auth, driverOnly, async (req,res)=>{
-  try{res.json(await query(`SELECT r.id,r.rider_id,u.name AS rider_name,r.pickup_location,r.destination,r.ride_type,r.distance_km,r.fare,r.status,r.created_at FROM rides r LEFT JOIN users u ON r.rider_id=u.id WHERE r.driver_id=? OR (r.status='requested' AND r.driver_id IS NULL) ORDER BY r.id DESC`,[req.user.id]));}
+  try{res.json(await query(`SELECT r.id,r.rider_id,r.driver_id,u.name AS rider_name,r.pickup_location,r.destination,r.ride_type,r.distance_km,r.fare,r.currency,r.status,r.created_at FROM rides r LEFT JOIN users u ON r.rider_id=u.id WHERE r.driver_id=? OR (r.status='requested' AND r.driver_id IS NULL) ORDER BY r.id DESC`,[req.user.id]));}
   catch(err){console.error(err);res.status(500).json({error:"Failed to get driver rides"});}
 });
 
 app.put("/api/driver-rides/:id", auth, driverOnly, async (req,res)=>{
-  const id=Number(req.params.id);const {status,final_fare}=req.body;const allowed=["accepted","ongoing","completed","cancelled"];
+  const id=Number(req.params.id);const {status,final_distance_km}=req.body;const allowed=["accepted","ongoing","completed","cancelled"];
   if(!allowed.includes(status))return res.status(400).json({error:"Invalid ride status"});
   try{
     const rows=await query(`SELECT * FROM rides WHERE id=? LIMIT 1`,[id]);if(!rows.length)return res.status(404).json({error:"Ride not found"});const ride=rows[0];
@@ -256,16 +369,18 @@ app.put("/api/driver-rides/:id", auth, driverOnly, async (req,res)=>{
     } else {
       if(Number(ride.driver_id)!==Number(req.user.id))return res.status(403).json({error:"This ride is not assigned to you"});
       if(status==="completed"){
-        if(ride.ride_type==="Direct Ride"){
-          const f=Number(final_fare);if(!Number.isFinite(f)||f<0)return res.status(400).json({error:"Final fare is required for Direct Ride"});
-          await query(`UPDATE rides SET status='completed',fare=? WHERE id=? AND driver_id=?`,[Number(f.toFixed(2)),id,req.user.id]);
+        if(!ride.destination?.trim()){
+          const km=Number(final_distance_km);if(!Number.isFinite(km)||km<=0)return res.status(400).json({error:"Enter the completed trip distance in km"});
+          const fare=calculateFare(ride.ride_type,km);
+          await query(`UPDATE rides SET status='completed',distance_km=?,fare=?,currency='KHR' WHERE id=? AND driver_id=?`,[Number(km.toFixed(2)),fare,id,req.user.id]);
         } else await query(`UPDATE rides SET status='completed' WHERE id=? AND driver_id=?`,[id,req.user.id]);
       } else await query(`UPDATE rides SET status=? WHERE id=? AND driver_id=?`,[status,id,req.user.id]);
     }
-    const updated=await query(`SELECT r.id,r.fare,r.status,r.rider_id FROM rides r WHERE r.id=?`,[id]);
+    const updated=await query(`SELECT r.id,r.fare,r.currency,r.status,r.rider_id FROM rides r WHERE r.id=?`,[id]);
     const u=updated[0];
-    if(u) await query(`INSERT INTO notifications(user_id,title,message,type) VALUES(?,?,?,?)`,[u.rider_id,"Ride updated",`Ride #${id} is now ${u.status}${u.fare!=null?` — fare $${Number(u.fare).toFixed(2)}`:""}.`,"ride"]);
-    res.json({message:"Ride updated successfully",fare:u?.fare??null,status:u?.status});
+    const fareLabel=u?.fare==null?"":` — fare ${u.currency==="KHR"?`${Number(u.fare).toLocaleString("en-US")}៛`:`$${Number(u.fare).toFixed(2)}`}`;
+    if(u) await query(`INSERT INTO notifications(user_id,title,message,type) VALUES(?,?,?,?)`,[u.rider_id,"Ride updated",`Ride #${id} is now ${u.status}${fareLabel}.`,"ride"]);
+    res.json({message:"Ride updated successfully",fare:u?.fare??null,currency:u?.currency,status:u?.status});
   }catch(err){console.error(err);res.status(500).json({error:"Failed to update ride"});}
 });
 
@@ -273,17 +388,17 @@ app.put("/api/driver-rides/:id", auth, driverOnly, async (req,res)=>{
 // PAYMENTS
 // =========================
 app.get("/api/payments", auth, adminOnly, async (req,res)=>{
-  try{res.json(await query(`SELECT p.id,p.ride_id,rider.name AS rider_name,p.amount,p.payment_method,p.status,p.created_at FROM payments p LEFT JOIN rides r ON p.ride_id=r.id LEFT JOIN users rider ON r.rider_id=rider.id ORDER BY p.id DESC`));}
+  try{res.json(await query(`SELECT p.id,p.ride_id,rider.name AS rider_name,p.amount,p.currency,p.payment_method,p.status,p.created_at FROM payments p LEFT JOIN rides r ON p.ride_id=r.id LEFT JOIN users rider ON r.rider_id=rider.id ORDER BY p.id DESC`));}
   catch(err){console.error(err);res.status(500).json({error:"Failed to get payments"});}
 });
 
 app.post("/api/payments", auth, riderOnly, async (req,res)=>{
   const {ride_id,payment_method="cash"}=req.body; if(!ride_id)return res.status(400).json({error:"Ride ID is required"});
   try{
-    const rides=await query(`SELECT id,rider_id,fare,status FROM rides WHERE id=? AND rider_id=? LIMIT 1`,[ride_id,req.user.id]);if(!rides.length)return res.status(404).json({error:"Ride not found"});
+    const rides=await query(`SELECT id,rider_id,fare,currency,status FROM rides WHERE id=? AND rider_id=? LIMIT 1`,[ride_id,req.user.id]);if(!rides.length)return res.status(404).json({error:"Ride not found"});
     const ride=rides[0];if(ride.fare==null)return res.status(400).json({error:"Final fare is not available yet"});
     const existing=await query(`SELECT id FROM payments WHERE ride_id=? LIMIT 1`,[ride_id]);if(existing.length)return res.json({message:"Payment already exists",payment_id:existing[0].id});
-    const r=await query(`INSERT INTO payments(ride_id,amount,payment_method,status) VALUES(?,?,?,'paid')`,[ride_id,ride.fare,payment_method]);res.status(201).json({message:"Payment recorded",payment_id:r.insertId,amount:ride.fare});
+    const r=await query(`INSERT INTO payments(ride_id,amount,currency,payment_method,status) VALUES(?,?,?,?,'paid')`,[ride_id,ride.fare,ride.currency||"KHR",payment_method]);res.status(201).json({message:"Payment recorded",payment_id:r.insertId,amount:ride.fare,currency:ride.currency||"KHR"});
   }catch(err){console.error(err);res.status(500).json({error:"Failed to record payment"});}
 });
 
@@ -298,6 +413,14 @@ app.get("/api/notifications", auth, adminOnly, async (req,res)=>{
 app.get("/api/my-notifications", auth, async (req,res)=>{
   try{res.json(await query(`SELECT id,title,message,type,is_read,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 100`,[req.user.id]));}
   catch(err){console.error(err);res.status(500).json({error:"Failed to get notifications"});}
+});
+
+app.put("/api/my-notifications/:id/read", auth, async (req,res)=>{
+  try {
+    const result=await query(`UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?`,[Number(req.params.id),req.user.id]);
+    if(!result.affectedRows)return res.status(404).json({error:"Notification not found"});
+    res.json({message:"Notification marked as read"});
+  } catch(err) { console.error(err); res.status(500).json({error:"Failed to update notification"}); }
 });
 
 // Availability is used by the driver workflow; admin can also use the same endpoint.

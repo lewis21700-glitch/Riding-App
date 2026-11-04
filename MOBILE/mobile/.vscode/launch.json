@@ -6,7 +6,9 @@
       "request": "launch",
       "type": "dart",
       "program": "${workspaceFolder}/lib/main.dart",
-      "deviceId": "emulator-5554"
+      "toolArgs": [
+        "--dart-define=API_BASE_URL=http://10.0.2.2:3000/api"
+      ]
     }
   ]
 }

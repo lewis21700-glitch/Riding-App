@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
+import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
@@ -11,14 +14,30 @@ import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'driver_home_page.dart';
 
-const String apiBase = String.fromEnvironment(
-  'API_BASE_URL',
-  defaultValue: 'http://10.0.2.2:3000/api',
-);
-const String mapTileUrl = String.fromEnvironment(
-  'MAP_TILE_URL',
-  defaultValue: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-);
+String get _resolveApiBase {
+  const env = String.fromEnvironment('API_BASE_URL');
+  if (env.isNotEmpty) return env;
+  if (kIsWeb) return 'http://127.0.0.1:3000/api';
+  try {
+    if (Platform.isAndroid) return 'http://10.0.2.2:3000/api';
+  } catch (_) {}
+  return 'http://127.0.0.1:3000/api';
+}
+
+final String apiBase = _resolveApiBase;
+String get _resolveMapTileUrl {
+  const configuredUrl = String.fromEnvironment('MAP_TILE_URL');
+  if (configuredUrl.isNotEmpty) return configuredUrl;
+  // The Android emulator cannot validate the machine's locally installed TLS
+  // interception CA. Use the development tile proxy on the host instead of
+  // weakening certificate checks in the Android app.
+  if (!kIsWeb && Platform.isAndroid) {
+    return 'http://10.0.2.2:3001/tiles/{z}/{x}/{y}.png';
+  }
+  return 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+}
+
+final String mapTileUrl = _resolveMapTileUrl;
 const String mapAttribution = String.fromEnvironment(
   'MAP_ATTRIBUTION',
   defaultValue: '© OpenStreetMap contributors',
@@ -136,7 +155,11 @@ class RideApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF111827)),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0B3ACD),
+          primary: const Color(0xFF0B3ACD),
+          secondary: const Color(0xFF264399),
+        ),
         scaffoldBackgroundColor: const Color(0xFFF7F8FA),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
@@ -168,9 +191,10 @@ class Api {
     String? token,
   }) async {
     final uri = Uri.parse('$apiBase$path');
+    final authToken = token ?? await Session.token();
     final headers = {
       'Content-Type': 'application/json',
-      if (token != null) 'Authorization': 'Bearer $token',
+      if (authToken != null) 'Authorization': 'Bearer $authToken',
     };
 
     final encodedBody = body == null ? null : jsonEncode(body);
@@ -251,6 +275,41 @@ class Session {
 int unreadNotificationCount(Iterable<Map<String, dynamic>> notifications) =>
     notifications.where((item) => !_asBool(item['is_read'])).length;
 
+List<Map<String, dynamic>> notificationItems(dynamic data) {
+  final raw = data is List
+      ? data
+      : data is Map
+          ? (data['notifications'] as List? ?? const [])
+          : const [];
+  return raw.map((item) => Map<String, dynamic>.from(item as Map)).toList();
+}
+
+String formatFare(Object? amount, [Object? currency]) {
+  final value = double.tryParse(amount?.toString() ?? '');
+  if (value == null) return '—';
+  if (currency?.toString().toUpperCase() == 'KHR') {
+    final digits = value.round().toString();
+    final grouped = digits.replaceAllMapped(
+        RegExp(r'(\d)(?=(\d{3})+(?!\d))'), (match) => '${match[1]},');
+    return '$grouped៛';
+  }
+  return '\$${value.toStringAsFixed(2)}';
+}
+
+const int khrPerUsd = 4100;
+
+int usdToKhr(Object? amount) {
+  final value = double.tryParse(amount?.toString() ?? '');
+  if (value == null || !value.isFinite || value < 0) return 0;
+  return (value * khrPerUsd / 100).round() * 100;
+}
+
+String formatFarePair(Object? amount) {
+  final value = double.tryParse(amount?.toString() ?? '');
+  if (value == null || !value.isFinite) return '—';
+  return '\$${value.toStringAsFixed(2)}  •  ${formatFare(usdToKhr(value), 'KHR')}';
+}
+
 class NotificationBell extends StatefulWidget {
   const NotificationBell({super.key});
 
@@ -297,8 +356,7 @@ class _NotificationBellState extends State<NotificationBell>
       final token = await Session.token();
       if (token == null) return;
       final data = await Api.request('GET', '/my-notifications', token: token);
-      final notifications = ((data as Map)['notifications'] as List? ?? [])
-          .map((item) => Map<String, dynamic>.from(item));
+      final notifications = notificationItems(data);
       if (mounted) {
         setState(() => unreadCount = unreadNotificationCount(notifications));
       }
@@ -359,11 +417,9 @@ class _SplashGateState extends State<SplashGate> {
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => user == null
-            ? const LoginPage()
-            : user['role'] == 'driver'
-                ? DriverHomePage(user: user, onLogout: _signOut)
-                : const HomePage(),
+        builder: (_) => user != null && user['role'] == 'driver'
+            ? DriverHomePage(user: user, onLogout: _signOut)
+            : const HomePage(),
       ),
     );
   }
@@ -391,7 +447,7 @@ Future<void> _signOut() async {
   final navigator = appNavigatorKey.currentState;
   if (navigator == null) return;
   navigator.pushAndRemoveUntil(
-    MaterialPageRoute(builder: (_) => const LoginPage()),
+    MaterialPageRoute(builder: (_) => const HomePage()),
     (_) => false,
   );
 }
@@ -484,7 +540,7 @@ class _LoginPageState extends State<LoginPage> {
                         style: TextStyle(
                             fontSize: 29, fontWeight: FontWeight.w800)),
                     const SizedBox(height: 7),
-                    const Text('Sign in to book a ride',
+                    const Text('Sign in to your RideApp account',
                         textAlign: TextAlign.center,
                         style: TextStyle(color: Color(0xFF6B7280))),
                     const SizedBox(height: 28),
@@ -552,10 +608,6 @@ class _RegisterPageState extends State<RegisterPage> {
   final email = TextEditingController();
   final phone = TextEditingController();
   final password = TextEditingController();
-  final vehicleType = TextEditingController(text: 'Car');
-  final vehicleModel = TextEditingController();
-  final plateNumber = TextEditingController();
-  String role = 'rider';
   bool loading = false;
 
   Future<void> register() async {
@@ -569,12 +621,6 @@ class _RegisterPageState extends State<RegisterPage> {
       _msg('Choose a password with at least 8 characters.');
       return;
     }
-    if (role == 'driver' &&
-        [vehicleType, vehicleModel, plateNumber]
-            .any((field) => field.text.trim().isEmpty)) {
-      _msg('Add your vehicle type, model and plate number.');
-      return;
-    }
     setState(() => loading = true);
     try {
       final data = await Api.request(
@@ -585,7 +631,6 @@ class _RegisterPageState extends State<RegisterPage> {
           'email': email.text.trim(),
           'phone': phone.text.trim(),
           'password': password.text,
-          'role': role,
         },
       );
       if (!mounted) return;
@@ -593,27 +638,10 @@ class _RegisterPageState extends State<RegisterPage> {
       final token = data['token'].toString();
       await Session.save(user, token);
       unawaited(PushNotifications.registerDevice());
-      if (role == 'driver') {
-        try {
-          await Api.request('POST', '/my-vehicle', token: token, body: {
-            'vehicle_type': vehicleType.text.trim(),
-            'vehicle_model': vehicleModel.text.trim(),
-            'plate_number': plateNumber.text.trim().toUpperCase(),
-          });
-        } catch (e) {
-          if (!mounted) return;
-          _msg(
-              'Account created. Add your vehicle after signing in: ${e.toString().replaceFirst('Exception: ', '')}');
-        }
-      }
       if (!mounted) return;
       Navigator.pushAndRemoveUntil(
         context,
-        MaterialPageRoute(
-          builder: (_) => role == 'driver'
-              ? DriverHomePage(user: user, onLogout: _signOut)
-              : const HomePage(),
-        ),
+        MaterialPageRoute(builder: (_) => const HomePage()),
         (_) => false,
       );
     } catch (e) {
@@ -632,9 +660,6 @@ class _RegisterPageState extends State<RegisterPage> {
     email.dispose();
     phone.dispose();
     password.dispose();
-    vehicleType.dispose();
-    vehicleModel.dispose();
-    plateNumber.dispose();
     super.dispose();
   }
 
@@ -644,17 +669,7 @@ class _RegisterPageState extends State<RegisterPage> {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            DropdownButtonFormField<String>(
-              initialValue: role,
-              decoration: const InputDecoration(labelText: 'Account type'),
-              items: const [
-                DropdownMenuItem(value: 'rider', child: Text('Passenger')),
-                DropdownMenuItem(value: 'driver', child: Text('Driver')),
-              ],
-              onChanged: loading
-                  ? null
-                  : (value) => setState(() => role = value ?? 'rider'),
-            ),
+            const Text('Create a passenger account to book rides.'),
             const SizedBox(height: 12),
             TextField(
                 controller: name,
@@ -678,25 +693,6 @@ class _RegisterPageState extends State<RegisterPage> {
               decoration: const InputDecoration(
                   labelText: 'Password (at least 8 characters)'),
             ),
-            if (role == 'driver') ...[
-              const SizedBox(height: 18),
-              const Text('Vehicle details',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-              const SizedBox(height: 10),
-              TextField(
-                  controller: vehicleType,
-                  decoration: const InputDecoration(labelText: 'Vehicle type')),
-              const SizedBox(height: 12),
-              TextField(
-                  controller: vehicleModel,
-                  decoration:
-                      const InputDecoration(labelText: 'Make and model')),
-              const SizedBox(height: 12),
-              TextField(
-                  controller: plateNumber,
-                  textCapitalization: TextCapitalization.characters,
-                  decoration: const InputDecoration(labelText: 'Plate number')),
-            ],
             const SizedBox(height: 20),
             SizedBox(
               height: 52,
@@ -715,7 +711,7 @@ class _RegisterPageState extends State<RegisterPage> {
       );
 }
 
-enum RideType { car, tukTuk, motorbike, direct }
+enum RideType { standard, comfort, premium, directRide }
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -782,11 +778,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> logout() async {
     await Session.clear();
     if (!mounted) return;
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(builder: (_) => const LoginPage()),
-      (_) => false,
-    );
+    setState(() {
+      user = {};
+      rides = [];
+    });
   }
 
   @override
@@ -798,26 +793,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          title: const Text('RideApp',
-              style: TextStyle(fontWeight: FontWeight.w800)),
-          actions: [
-            const NotificationBell(),
-            IconButton(
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => ProfilePage(user: user)),
+        appBar: tab == 0
+            ? null
+            : AppBar(
+                title: const Text('RideApp',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                actions: [
+                  const NotificationBell(),
+                  IconButton(
+                    tooltip: 'Passenger account',
+                    onPressed: () => setState(() => tab = 2),
+                    icon: const Icon(Icons.person_outline),
+                  ),
+                ],
               ),
-              icon: const Icon(Icons.person_outline),
-            ),
-          ],
-        ),
         body: IndexedStack(
           index: tab,
           children: [
-            BookingPage(onBooked: load),
+            BookingPage(
+              onBooked: load,
+              onProfileTap: () => setState(() => tab = 2),
+            ),
             HistoryPage(rides: rides, loading: loading, onRefresh: load),
-            ProfilePage(user: user, embedded: true, onLogout: logout),
+            ProfilePage(
+              user: user,
+              embedded: true,
+              onLogout: logout,
+              onAuthSuccess: load,
+            ),
           ],
         ),
         bottomNavigationBar: NavigationBar(
@@ -841,9 +844,69 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
 }
 
+class PlaceItem {
+  final String label;
+  final double lat;
+  final double lng;
+  final IconData icon;
+  final String category;
+
+  const PlaceItem(this.label, this.lat, this.lng, this.icon, this.category);
+}
+
+const List<PlaceItem> kPhnomPenhLandmarks = [
+  PlaceItem('Aeon Mall 1 (Samdach Sothearos Blvd)', 11.5475, 104.9351,
+      Icons.shopping_bag_outlined, 'Shopping Mall'),
+  PlaceItem('Independence Monument', 11.5564, 104.9282,
+      Icons.account_balance_outlined, 'Landmark / City Center'),
+  PlaceItem('Royal Palace Phnom Penh', 11.5638, 104.9317, Icons.castle_outlined,
+      'Historical Palace'),
+  PlaceItem('Central Market (Phsar Thmey)', 11.5696, 104.9213,
+      Icons.storefront_outlined, 'Famous Market'),
+  PlaceItem('Wat Phnom Historical Park', 11.5762, 104.9230,
+      Icons.temple_buddhist_outlined, 'Temple Park'),
+  PlaceItem('Russian Market (Toul Tom Poung)', 11.5408, 104.9142,
+      Icons.shopping_cart_outlined, 'Market & Food'),
+  PlaceItem('Phnom Penh International Airport (PNH)', 11.5466, 104.8441,
+      Icons.flight_takeoff_outlined, 'Airport'),
+  PlaceItem('Tuol Sleng Genocide Museum (S-21)', 11.5494, 104.9174,
+      Icons.museum_outlined, 'Museum'),
+  PlaceItem('Phnom Penh Railway Station', 11.5739, 104.9169,
+      Icons.train_outlined, 'Train Station'),
+  PlaceItem('Riverside (Sisowath Quay)', 11.5682, 104.9312,
+      Icons.water_outlined, 'Riverside Promenade'),
+  PlaceItem('Olympic Stadium Phnom Penh', 11.5578, 104.9126,
+      Icons.stadium_outlined, 'Sports Complex'),
+  PlaceItem('Aeon Mall 2 Sen Sok', 11.5976, 104.8860,
+      Icons.shopping_bag_outlined, 'Shopping Mall'),
+  PlaceItem('Calmette Hospital', 11.5833, 104.9167,
+      Icons.local_hospital_outlined, 'General Hospital'),
+  PlaceItem('NagaWorld Resort & Casino', 11.5528, 104.9392,
+      Icons.hotel_outlined, 'Resort & Entertainment'),
+  PlaceItem('Koh Pich (Diamond Island)', 11.5478, 104.9431,
+      Icons.apartment_outlined, 'Business & Convention'),
+  PlaceItem('BKK1 (Boeung Keng Kang 1)', 11.5510, 104.9248,
+      Icons.location_city_outlined, 'Cafe & Embassy District'),
+];
+
+PlaceItem? findLandmark(String text) {
+  final clean = text.trim().toLowerCase();
+  if (clean.isEmpty) return null;
+  for (final item in kPhnomPenhLandmarks) {
+    final label = item.label.toLowerCase();
+    if (label.contains(clean) || clean.contains(label)) return item;
+  }
+  final words = clean.split(RegExp(r'\s+')).where((w) => w.length > 2);
+  for (final item in kPhnomPenhLandmarks) {
+    if (words.any((w) => item.label.toLowerCase().contains(w))) return item;
+  }
+  return null;
+}
+
 class BookingPage extends StatefulWidget {
   final Future<void> Function() onBooked;
-  const BookingPage({super.key, required this.onBooked});
+  final VoidCallback? onProfileTap;
+  const BookingPage({super.key, required this.onBooked, this.onProfileTap});
   @override
   State<BookingPage> createState() => _BookingPageState();
 }
@@ -851,16 +914,486 @@ class BookingPage extends StatefulWidget {
 class _BookingPageState extends State<BookingPage> {
   final pickup = TextEditingController();
   final destination = TextEditingController();
+  final MapController _mapController = MapController();
+  List<LatLng> _routePoints = [];
 
-  RideType type = RideType.car;
+  RideType type = RideType.standard;
   bool locating = false;
   bool estimating = false;
   bool booking = false;
+  bool _mapReady = false;
+  bool _pickingDestination = false;
   double? estimatedFare;
   double? distanceKm;
+  double? estimatedDurationMinutes;
   double? pickupLatitude;
   double? pickupLongitude;
+  double? destinationLatitude;
+  double? destinationLongitude;
   String? message;
+  Map<String, double> typeFaresUsd = {};
+  Map<String, int> typeFaresKhr = {};
+  Map<String, dynamic>? fareBreakdown;
+
+  LatLng? get _pickupPoint => pickupLatitude == null || pickupLongitude == null
+      ? null
+      : LatLng(pickupLatitude!, pickupLongitude!);
+
+  LatLng? get _destinationPoint =>
+      destinationLatitude == null || destinationLongitude == null
+          ? null
+          : LatLng(destinationLatitude!, destinationLongitude!);
+
+  List<LatLng> get _selectedPoints => [
+        if (_pickupPoint != null) _pickupPoint!,
+        if (_destinationPoint != null) _destinationPoint!,
+      ];
+
+  List<LatLng> _generateRoadCurve(LatLng p1, LatLng p2) {
+    final list = <LatLng>[];
+    const steps = 10;
+    for (int i = 0; i <= steps; i++) {
+      final t = i / steps;
+      final lat = p1.latitude + (p2.latitude - p1.latitude) * t;
+      final lng = p1.longitude + (p2.longitude - p1.longitude) * t;
+      final offset = math.sin(t * math.pi) * 0.0006;
+      list.add(LatLng(lat + offset, lng - offset));
+    }
+    return list;
+  }
+
+  void _focusBookingMap() {
+    if (!_mapReady) return;
+    final points = _selectedPoints;
+    if (points.length > 1) {
+      _mapController.fitCamera(CameraFit.coordinates(
+        coordinates: points,
+        padding: const EdgeInsets.all(56),
+        maxZoom: 16,
+      ));
+    } else if (points.length == 1) {
+      _mapController.move(points.first, 15);
+    }
+  }
+
+  void _swapLocations() {
+    setState(() {
+      final tempText = pickup.text;
+      pickup.text = destination.text;
+      destination.text = tempText;
+
+      final tempLat = pickupLatitude;
+      final tempLng = pickupLongitude;
+      pickupLatitude = destinationLatitude;
+      pickupLongitude = destinationLongitude;
+      destinationLatitude = tempLat;
+      destinationLongitude = tempLng;
+
+      estimatedFare = null;
+      distanceKm = null;
+      estimatedDurationMinutes = null;
+      _routePoints = [];
+      message = null;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusBookingMap();
+      if (pickupLatitude != null && destinationLatitude != null) {
+        estimateFare();
+      }
+    });
+  }
+
+  void _selectPlace(PlaceItem place, {required bool isPickup}) {
+    setState(() {
+      if (isPickup) {
+        pickup.text = place.label;
+        pickupLatitude = place.lat;
+        pickupLongitude = place.lng;
+        _pickingDestination = true;
+      } else {
+        destination.text = place.label;
+        destinationLatitude = place.lat;
+        destinationLongitude = place.lng;
+      }
+      estimatedFare = null;
+      distanceKm = null;
+      estimatedDurationMinutes = null;
+      _routePoints = [];
+      message = null;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusBookingMap();
+      if (pickupLatitude != null && destinationLatitude != null) {
+        estimateFare();
+      }
+    });
+  }
+
+  Future<void> _openPlacePicker({required bool isPickup}) async {
+    final searchCtrl = TextEditingController();
+    List<PlaceItem> filteredLandmarks = List.of(kPhnomPenhLandmarks);
+    List<Map<String, dynamic>> remoteResults = [];
+    bool isSearchingRemote = false;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            void filterPlaces(String q) async {
+              final clean = q.trim().toLowerCase();
+              if (clean.isEmpty) {
+                setModalState(() {
+                  filteredLandmarks = List.of(kPhnomPenhLandmarks);
+                  remoteResults = [];
+                  isSearchingRemote = false;
+                });
+                return;
+              }
+
+              final local = kPhnomPenhLandmarks.where((p) {
+                return p.label.toLowerCase().contains(clean) ||
+                    p.category.toLowerCase().contains(clean);
+              }).toList();
+
+              setModalState(() {
+                filteredLandmarks = local;
+                if (clean.length >= 3) {
+                  isSearchingRemote = true;
+                }
+              });
+
+              if (clean.length >= 3) {
+                try {
+                  final resp = await Api.request(
+                    'GET',
+                    '/places/search?q=${Uri.encodeQueryComponent(clean)}',
+                  );
+                  final places = ((resp as Map)['places'] as List? ?? const [])
+                      .map((p) => Map<String, dynamic>.from(p as Map))
+                      .toList();
+                  if (ctx.mounted) {
+                    setModalState(() {
+                      remoteResults = places;
+                      isSearchingRemote = false;
+                    });
+                  }
+                } catch (_) {
+                  if (ctx.mounted) {
+                    setModalState(() => isSearchingRemote = false);
+                  }
+                }
+              }
+            }
+
+            return DraggableScrollableSheet(
+              initialChildSize: 0.72,
+              minChildSize: 0.45,
+              maxChildSize: 0.94,
+              expand: false,
+              builder: (ctx, scrollCtrl) {
+                return Column(
+                  children: [
+                    Container(
+                      margin: const EdgeInsets.only(top: 10, bottom: 8),
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 8),
+                      child: Row(
+                        children: [
+                          Icon(
+                            isPickup ? Icons.trip_origin : Icons.location_on,
+                            color: isPickup
+                                ? const Color(0xFF16A34A)
+                                : const Color(0xFFDC2626),
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            isPickup
+                                ? 'Select Pickup Location'
+                                : 'Select Destination',
+                            style: const TextStyle(
+                                fontSize: 18, fontWeight: FontWeight.w800),
+                          ),
+                          const Spacer(),
+                          IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: () => Navigator.pop(ctx),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 4),
+                      child: TextField(
+                        controller: searchCtrl,
+                        autofocus: false,
+                        onChanged: filterPlaces,
+                        decoration: InputDecoration(
+                          hintText: 'Search landmark, hotel, street...',
+                          prefixIcon: const Icon(Icons.search),
+                          suffixIcon: searchCtrl.text.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(Icons.clear),
+                                  onPressed: () {
+                                    searchCtrl.clear();
+                                    filterPlaces('');
+                                  },
+                                )
+                              : null,
+                          filled: true,
+                          fillColor: const Color(0xFFF3F4F6),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 12),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(
+                        children: [
+                          if (isPickup) ...[
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 10, horizontal: 8),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12)),
+                                ),
+                                icon: const Icon(Icons.my_location, size: 18),
+                                label: const Text('My GPS',
+                                    style: TextStyle(fontSize: 12)),
+                                onPressed: () {
+                                  Navigator.pop(ctx);
+                                  useCurrentLocation();
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 10, horizontal: 8),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12)),
+                              ),
+                              icon: const Icon(Icons.touch_app_outlined,
+                                  size: 18),
+                              label: const Text('Pick on Map',
+                                  style: TextStyle(fontSize: 12)),
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                                setState(() {
+                                  _pickingDestination = !isPickup;
+                                });
+                                _msg(isPickup
+                                    ? 'Tap anywhere on the map to set pickup'
+                                    : 'Tap anywhere on the map to set destination');
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 18),
+                    Expanded(
+                      child: ListView(
+                        controller: scrollCtrl,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        children: [
+                          if (isSearchingRemote)
+                            const Padding(
+                              padding: EdgeInsets.all(16),
+                              child: Center(
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2)),
+                            ),
+                          if (remoteResults.isNotEmpty) ...[
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 6),
+                              child: Text(
+                                'SEARCH RESULTS',
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFF6B7280)),
+                              ),
+                            ),
+                            ...remoteResults.map((place) {
+                              final label = place['label']?.toString() ?? '';
+                              final lat = double.tryParse(
+                                      place['latitude']?.toString() ?? '') ??
+                                  11.5564;
+                              final lng = double.tryParse(
+                                      place['longitude']?.toString() ?? '') ??
+                                  104.9282;
+                              return ListTile(
+                                dense: true,
+                                leading: const Icon(Icons.search,
+                                    color: Color(0xFF0B3ACD)),
+                                title: Text(label,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w600)),
+                                onTap: () {
+                                  Navigator.pop(ctx);
+                                  _selectPlace(
+                                    PlaceItem(label, lat, lng,
+                                        Icons.location_on, 'Search Result'),
+                                    isPickup: isPickup,
+                                  );
+                                },
+                              );
+                            }),
+                            const Divider(height: 18),
+                          ],
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 6),
+                            child: Text(
+                              'POPULAR PLACES & LANDMARKS',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFF6B7280)),
+                            ),
+                          ),
+                          ...filteredLandmarks.map((place) {
+                            return ListTile(
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              leading: Container(
+                                width: 38,
+                                height: 38,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF3F4F6),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(place.icon,
+                                    color: const Color(0xFF0B3ACD), size: 20),
+                              ),
+                              title: Text(place.label,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 14)),
+                              subtitle: Text(place.category,
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Color(0xFF6B7280))),
+                              trailing: const Icon(Icons.chevron_right,
+                                  size: 18, color: Color(0xFF9CA3AF)),
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _selectPlace(place, isPickup: isPickup);
+                              },
+                            );
+                          }),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _selectMapPoint(LatLng point) {
+    final label =
+        'GPS: ${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)}';
+    final wasPickingDest = _pickingDestination;
+    setState(() {
+      if (wasPickingDest) {
+        destinationLatitude = point.latitude;
+        destinationLongitude = point.longitude;
+        destination.text = label;
+      } else {
+        pickupLatitude = point.latitude;
+        pickupLongitude = point.longitude;
+        pickup.text = label;
+        _pickingDestination = true;
+      }
+      estimatedFare = null;
+      distanceKm = null;
+      estimatedDurationMinutes = null;
+      _routePoints = [];
+      message = null;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _focusBookingMap());
+    unawaited(_reverseGeocode(point, destination: wasPickingDest));
+    if (pickupLatitude != null && destinationLatitude != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => estimateFare());
+    }
+  }
+
+  Future<void> _reverseGeocode(LatLng point,
+      {required bool destination}) async {
+    try {
+      final data = await Api.request('GET',
+          '/places/reverse?lat=${point.latitude}&lon=${point.longitude}');
+      final label = (data as Map)['label']?.toString();
+      if (!mounted || label == null || label.isEmpty) {
+        if (!destination && mounted) {
+          setState(() {
+            if (pickupLatitude == point.latitude &&
+                pickupLongitude == point.longitude) {
+              pickup.text =
+                  'Current location (${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)})';
+            }
+          });
+        }
+        return;
+      }
+      setState(() {
+        if (destination &&
+            destinationLatitude == point.latitude &&
+            destinationLongitude == point.longitude) {
+          this.destination.text = label;
+        } else if (!destination &&
+            pickupLatitude == point.latitude &&
+            pickupLongitude == point.longitude) {
+          pickup.text = label;
+        }
+      });
+      if (destination && pickupLatitude != null) await estimateFare();
+    } catch (_) {
+      if (!destination && mounted) {
+        setState(() {
+          if (pickupLatitude == point.latitude &&
+              pickupLongitude == point.longitude) {
+            pickup.text =
+                'Current location (${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)})';
+          }
+        });
+      }
+      if (destination && pickupLatitude != null) await estimateFare();
+    }
+  }
+
+  Future<void> _searchPlace({required bool isPickup}) async {
+    await _openPlacePicker(isPickup: isPickup);
+  }
 
   Future<void> useCurrentLocation() async {
     setState(() {
@@ -871,56 +1404,103 @@ class _BookingPageState extends State<BookingPage> {
     });
     try {
       if (!await Geolocator.isLocationServiceEnabled()) {
-        throw Exception('Please turn on location on the emulator.');
+        throw Exception('Turn on Location services, then try again.');
       }
+
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        throw Exception('Location permission was not granted.');
+      if (permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.denied) {
+        throw Exception(
+            'Allow RideApp to access location in Android Settings.');
       }
 
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 20),
+          accuracy: LocationAccuracy.best,
+          timeLimit: Duration(seconds: 12),
         ),
       );
-      pickupLatitude = pos.latitude;
-      pickupLongitude = pos.longitude;
-      pickup.text =
-          'GPS: ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}';
-      if (mounted) setState(() {});
-    } catch (e) {
-      _msg(e.toString().replaceFirst('Exception: ', ''));
+      if (!pos.latitude.isFinite ||
+          !pos.longitude.isFinite ||
+          pos.latitude.abs() > 90 ||
+          pos.longitude.abs() > 180) {
+        throw Exception('The device returned an invalid GPS location.');
+      }
+      final double lat = pos.latitude;
+      final double lng = pos.longitude;
+
+      setState(() {
+        pickupLatitude = lat;
+        pickupLongitude = lng;
+        pickup.text = 'Finding nearby address…';
+        _routePoints = [];
+        _pickingDestination = true;
+      });
+      await _reverseGeocode(LatLng(lat, lng), destination: false);
+
+      if (destinationLatitude != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => estimateFare());
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_mapReady && mounted) {
+          _mapController.move(LatLng(lat, lng), 15);
+        }
+      });
+    } catch (error) {
+      if (mounted) {
+        final detail = error.toString().replaceFirst('Exception: ', '');
+        _msg(detail.isEmpty
+            ? 'Could not get your current location. Check GPS and permissions.'
+            : detail);
+      }
     } finally {
       if (mounted) setState(() => locating = false);
     }
   }
 
   Future<void> estimateFare() async {
-    if (type == RideType.direct) {
-      setState(() {
-        estimatedFare = null;
-        distanceKm = null;
-        message =
-            'Final fare will be calculated after the driver completes the ride.';
-      });
-      return;
-    }
     if (pickup.text.trim().isEmpty) {
       _msg('Enter pickup or use current location.');
       return;
     }
+
+    if (pickupLatitude == null || pickupLongitude == null) {
+      final match = findLandmark(pickup.text);
+      if (match != null) {
+        pickupLatitude = match.lat;
+        pickupLongitude = match.lng;
+      } else {
+        pickupLatitude = 11.5564;
+        pickupLongitude = 104.9282;
+      }
+    }
+
     if (destination.text.trim().isEmpty) {
       setState(() {
         estimatedFare = null;
         distanceKm = null;
-        message = 'Enter your destination to see the fare.';
+        estimatedDurationMinutes = null;
+        typeFaresUsd.clear();
+        typeFaresKhr.clear();
+        fareBreakdown = null;
+        message =
+            'Choose “Where to?” for an upfront fare, or book without a destination and settle after the ride.';
       });
       return;
+    }
+
+    if (destinationLatitude == null || destinationLongitude == null) {
+      final match = findLandmark(destination.text);
+      if (match != null) {
+        destinationLatitude = match.lat;
+        destinationLongitude = match.lng;
+      } else {
+        destinationLatitude = 11.5475;
+        destinationLongitude = 104.9351;
+      }
     }
 
     setState(() => estimating = true);
@@ -931,22 +1511,59 @@ class _BookingPageState extends State<BookingPage> {
         body: {
           'pickup': pickup.text.trim(),
           'destination': destination.text.trim(),
-          'ride_type': type.name,
-          if (pickupLatitude != null && pickupLongitude != null) ...{
-            'pickup_lat': pickupLatitude,
-            'pickup_lng': pickupLongitude,
-          },
+          'ride_type': vehicleType(type),
+          'pickup_lat': pickupLatitude,
+          'pickup_lng': pickupLongitude,
+          'destination_lat': destinationLatitude,
+          'destination_lng': destinationLongitude,
         },
       );
       final rawFare = data['estimated_fare'] ?? data['fare'];
+      final tfMap = data['type_fares'];
+      final newTypeFaresUsd = <String, double>{};
+      final newTypeFaresKhr = <String, int>{};
+      if (tfMap is Map) {
+        tfMap.forEach((k, v) {
+          if (v is Map) {
+            newTypeFaresUsd[k.toString()] =
+                double.tryParse(v['usd']?.toString() ?? '0') ?? 0.0;
+            newTypeFaresKhr[k.toString()] =
+                int.tryParse(v['khr']?.toString() ?? '0') ?? 0;
+          }
+        });
+      }
+      final newBreakdown = data['breakdown'] is Map
+          ? Map<String, dynamic>.from(data['breakdown'] as Map)
+          : null;
       setState(() {
+        typeFaresUsd = newTypeFaresUsd;
+        typeFaresKhr = newTypeFaresKhr;
+        fareBreakdown = newBreakdown;
         estimatedFare =
             rawFare == null ? null : double.tryParse(rawFare.toString());
         distanceKm = data['distance_km'] == null
             ? null
             : double.tryParse(data['distance_km'].toString());
+        estimatedDurationMinutes = data['estimated_duration_minutes'] == null
+            ? null
+            : double.tryParse(data['estimated_duration_minutes'].toString());
+        pickupLatitude ??=
+            double.tryParse(data['pickup_lat']?.toString() ?? '');
+        pickupLongitude ??=
+            double.tryParse(data['pickup_lng']?.toString() ?? '');
+        destinationLatitude ??=
+            double.tryParse(data['destination_lat']?.toString() ?? '');
+        destinationLongitude ??=
+            double.tryParse(data['destination_lng']?.toString() ?? '');
         message = null;
+        _routePoints = ((data['route_points'] as List?) ?? const [])
+            .map((point) => LatLng(
+                  double.parse((point as Map)['latitude'].toString()),
+                  double.parse(point['longitude'].toString()),
+                ))
+            .toList();
       });
+      WidgetsBinding.instance.addPostFrameCallback((_) => _focusBookingMap());
     } catch (e) {
       _msg(e.toString().replaceFirst('Exception: ', ''));
     } finally {
@@ -959,18 +1576,16 @@ class _BookingPageState extends State<BookingPage> {
       _msg('Please select or enter pickup.');
       return;
     }
-    if (type != RideType.direct && destination.text.trim().isEmpty) {
-      _msg('Please enter destination.');
-      return;
-    }
-    if (type != RideType.direct && estimatedFare == null) {
+    final hasDestination = destination.text.trim().isNotEmpty;
+    if (hasDestination && estimatedFare == null) {
       await estimateFare();
       if (estimatedFare == null) return;
     }
 
     final user = await Session.user();
     if (user == null) {
-      _msg('Please login again.');
+      _msg('Please sign in from the Account tab to book your ride.');
+      widget.onProfileTap?.call();
       return;
     }
 
@@ -982,14 +1597,17 @@ class _BookingPageState extends State<BookingPage> {
         body: {
           'rider_id': user['id'],
           'pickup_location': pickup.text.trim(),
-          'destination':
-              type == RideType.direct ? null : destination.text.trim(),
-          'ride_type': type.name,
-          'fare': type == RideType.direct ? null : estimatedFare,
+          'destination': hasDestination ? destination.text.trim() : null,
+          'ride_type': vehicleType(type),
+          'fare': hasDestination ? estimatedFare : null,
           'distance_km': distanceKm,
           if (pickupLatitude != null && pickupLongitude != null) ...{
             'pickup_lat': pickupLatitude,
             'pickup_lng': pickupLongitude,
+          },
+          if (destinationLatitude != null && destinationLongitude != null) ...{
+            'destination_lat': destinationLatitude,
+            'destination_lng': destinationLongitude,
           },
         },
       );
@@ -1005,24 +1623,27 @@ class _BookingPageState extends State<BookingPage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.check_circle, size: 48),
+              const Icon(Icons.check_circle,
+                  size: 48, color: Color(0xFF16A34A)),
               const SizedBox(height: 10),
               const Text('Ride requested',
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               const SizedBox(height: 8),
               Text(
-                type == RideType.direct
-                    ? 'Your driver will complete the ride and the final fare will be calculated then.'
-                    : 'Estimated fare: \$${estimatedFare!.toStringAsFixed(2)}',
+                hasDestination
+                    ? 'Estimated fare: ${formatFarePair(estimatedFare)}'
+                    : 'No destination set. The driver will record the trip distance and calculate the final fare after the ride.',
               ),
-              if (data['ride'] != null) ...[
+              if (data['ride_id'] != null) ...[
                 const SizedBox(height: 6),
-                Text('Ride #${data['ride']['id']}'),
+                Text('Ride #${data['ride_id']}'),
               ],
               const SizedBox(height: 16),
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF0B3ACD)),
                   onPressed: () => Navigator.pop(context),
                   child: const Text('Done'),
                 ),
@@ -1036,8 +1657,12 @@ class _BookingPageState extends State<BookingPage> {
       destination.clear();
       pickupLatitude = null;
       pickupLongitude = null;
+      destinationLatitude = null;
+      destinationLongitude = null;
       estimatedFare = null;
       distanceKm = null;
+      estimatedDurationMinutes = null;
+      _routePoints = [];
       message = null;
       setState(() {});
     } catch (e) {
@@ -1057,251 +1682,816 @@ class _BookingPageState extends State<BookingPage> {
     super.dispose();
   }
 
-  String title(RideType t) => switch (t) {
-        RideType.car => 'Car',
-        RideType.tukTuk => 'TukTuk',
-        RideType.motorbike => 'Motorbike',
-        RideType.direct => 'Direct Ride',
+  String vehicleType(RideType t) => switch (t) {
+        RideType.standard => 'Standard',
+        RideType.comfort => 'Comfort',
+        RideType.premium => 'Premium',
+        RideType.directRide => 'Direct Ride',
+      };
+
+  int capacity(RideType t) => switch (t) {
+        RideType.standard => 4,
+        RideType.comfort => 4,
+        RideType.premium => 4,
+        RideType.directRide => 4,
+      };
+
+  int startingFareKhr(RideType t) => switch (t) {
+        RideType.standard => 4000,
+        RideType.comfort => 6000,
+        RideType.premium => 10000,
+        RideType.directRide => 0,
+      };
+
+  String fareKey(RideType t) => switch (t) {
+        RideType.standard => 'Car',
+        RideType.comfort => 'Comfort',
+        RideType.premium => 'Premium',
+        RideType.directRide => 'Direct Ride',
       };
 
   String subtitle(RideType t) => switch (t) {
-        RideType.car => 'Comfortable city car',
-        RideType.tukTuk => 'Popular Cambodia ride',
-        RideType.motorbike => 'Quick and affordable',
-        RideType.direct => 'No destination • final fare later',
+        RideType.standard => 'Affordable everyday ride • Up to 4 seats',
+        RideType.comfort => 'Spacious vehicle & AC • Up to 4 seats',
+        RideType.premium => 'Executive comfort • Up to 4 seats',
+        RideType.directRide => 'No destination • Final fare calculated later',
       };
 
   IconData icon(RideType t) => switch (t) {
-        RideType.car => Icons.directions_car_filled_rounded,
-        RideType.tukTuk => Icons.electric_rickshaw_rounded,
-        RideType.motorbike => Icons.two_wheeler_rounded,
-        RideType.direct => Icons.route_rounded,
+        RideType.standard => Icons.directions_car_filled_rounded,
+        RideType.comfort => Icons.airport_shuttle_rounded,
+        RideType.premium => Icons.local_taxi_rounded,
+        RideType.directRide => Icons.route_rounded,
       };
 
-  @override
-  Widget build(BuildContext context) => ListView(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 30),
+  Widget _buildBookingMap() => FlutterMap(
+        mapController: _mapController,
+        options: MapOptions(
+          initialCenter: _pickupPoint ??
+              _destinationPoint ??
+              const LatLng(11.5564, 104.9282),
+          initialZoom: 14,
+          onMapReady: () {
+            _mapReady = true;
+            WidgetsBinding.instance
+                .addPostFrameCallback((_) => _focusBookingMap());
+          },
+          onTap: (_, point) => _selectMapPoint(point),
+        ),
         children: [
-          const Text('Where are you going?',
-              style: TextStyle(fontSize: 25, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 6),
-          const Text('Choose pickup, ride type and destination.',
-              style: TextStyle(color: Color(0xFF6B7280))),
-          const SizedBox(height: 18),
-          Card(
-            elevation: 0,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(18),
-              side: const BorderSide(color: Color(0xFFE5E7EB)),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  TextField(
-                    controller: pickup,
-                    onChanged: (_) => setState(() {
-                      pickupLatitude = null;
-                      pickupLongitude = null;
-                      estimatedFare = null;
-                      distanceKm = null;
-                    }),
-                    decoration: InputDecoration(
-                      labelText: 'Pickup location',
-                      prefixIcon: const Icon(Icons.trip_origin),
-                      suffixIcon: IconButton(
-                        tooltip: 'Use current location',
-                        onPressed: locating ? null : useCurrentLocation,
-                        icon: locating
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.my_location),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  if (type == RideType.direct)
+          TileLayer(
+            urlTemplate: mapTileUrl,
+            userAgentPackageName: 'com.example.mobile',
+            maxNativeZoom: 19,
+          ),
+          if (_pickupPoint != null && _destinationPoint != null)
+            PolylineLayer(polylines: [
+              // High-contrast casing border
+              Polyline(
+                points: _routePoints.length > 1
+                    ? _routePoints
+                    : _generateRoadCurve(_pickupPoint!, _destinationPoint!),
+                strokeWidth: 8,
+                color: const Color(0xFF1E293B),
+                strokeCap: StrokeCap.round,
+                strokeJoin: StrokeJoin.round,
+              ),
+              // Main navigation line with gradient towards drop-off pin
+              Polyline(
+                points: _routePoints.length > 1
+                    ? _routePoints
+                    : _generateRoadCurve(_pickupPoint!, _destinationPoint!),
+                strokeWidth: 5,
+                color: const Color(0xFF0B3ACD),
+                gradientColors: const [
+                  Color(0xFF0B3ACD),
+                  Color(0xFF2563EB),
+                  Color(0xFFDC2626),
+                ],
+                strokeCap: StrokeCap.round,
+                strokeJoin: StrokeJoin.round,
+              ),
+            ]),
+          MarkerLayer(markers: [
+            if (_pickupPoint != null)
+              Marker(
+                point: _pickupPoint!,
+                width: 90,
+                height: 54,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
                     Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(13),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF3F4F6),
-                        borderRadius: BorderRadius.circular(12),
+                        color: const Color(0xFF16A34A),
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black26, blurRadius: 4)
+                        ],
                       ),
-                      child: const Text(
-                          'Direct Ride does not require a destination.'),
-                    )
-                  else
-                    TextField(
-                      controller: destination,
-                      onChanged: (_) => setState(() {
-                        estimatedFare = null;
-                        distanceKm = null;
-                      }),
-                      decoration: const InputDecoration(
-                        labelText: 'Destination',
-                        prefixIcon: Icon(Icons.location_on_outlined),
-                      ),
+                      child: const Text('Pickup',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold)),
                     ),
+                    const Icon(Icons.location_on,
+                        color: Color(0xFF16A34A), size: 32),
+                  ],
+                ),
+              ),
+            if (_destinationPoint != null)
+              Marker(
+                point: _destinationPoint!,
+                width: 100,
+                height: 54,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFDC2626),
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black26, blurRadius: 4)
+                        ],
+                      ),
+                      child: const Text('Destination',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                    const Icon(Icons.location_on,
+                        color: Color(0xFFDC2626), size: 32),
+                  ],
+                ),
+              ),
+          ]),
+          RichAttributionWidget(attributions: [
+            TextSourceAttribution(mapAttribution),
+          ]),
+        ],
+      );
+
+  Widget _buildRideCard(RideType rideType) {
+    final selected = type == rideType;
+    final typeName = vehicleType(rideType);
+    final typeFareKey = fareKey(rideType);
+    final hasMultiFare = typeFaresUsd.containsKey(typeFareKey);
+    final cardFare = hasMultiFare
+        ? typeFaresUsd[typeFareKey]
+        : (rideType == type ? estimatedFare : null);
+    final cardFareKhr = hasMultiFare
+        ? typeFaresKhr[typeFareKey]
+        : cardFare == null
+            ? null
+            : usdToKhr(cardFare);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 9),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () {
+          setState(() {
+            type = rideType;
+            if (hasMultiFare) {
+              estimatedFare = typeFaresUsd[typeFareKey];
+            }
+            message = destination.text.trim().isEmpty
+                ? 'Choose “Where to?” for an upfront fare, or book now and settle after the trip.'
+                : null;
+            if (destinationLatitude != null &&
+                pickupLatitude != null &&
+                !hasMultiFare) {
+              WidgetsBinding.instance
+                  .addPostFrameCallback((_) => estimateFare());
+            }
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFEAF1FF) : Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color:
+                  selected ? const Color(0xFF0B3ACD) : const Color(0xFFE5E7EB),
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: Row(children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: selected ? Colors.white : const Color(0xFFF3F4F6),
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: Icon(icon(rideType), color: const Color(0xFF0B3ACD)),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(typeName,
+                      style: const TextStyle(fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 2),
+                  Text(subtitle(rideType),
+                      style: const TextStyle(
+                          color: Color(0xFF6B7280), fontSize: 12)),
                 ],
               ),
             ),
-          ),
-          const SizedBox(height: 18),
-          const Text('Choose ride',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 10),
-          ...RideType.values.map(
-            (t) => Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(16),
-                onTap: () {
-                  setState(() {
-                    type = t;
-                    estimatedFare = null;
-                    distanceKm = null;
-                    message = t == RideType.direct
-                        ? 'Final fare will be calculated after the driver completes the ride.'
-                        : null;
-                  });
-                },
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: type == t ? const Color(0xFF111827) : Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: type == t
-                          ? const Color(0xFF111827)
-                          : const Color(0xFFE5E7EB),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  rideType == RideType.directRide
+                      ? 'Final fare after ride'
+                      : cardFareKhr != null
+                          ? formatFare(cardFareKhr, 'KHR')
+                          : 'from ${formatFare(startingFareKhr(rideType), 'KHR')}',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    color: selected
+                        ? const Color(0xFF0B3ACD)
+                        : const Color(0xFF1E293B),
+                    fontSize: 14,
+                  ),
+                ),
+                if (rideType != RideType.directRide)
+                  Text(
+                    cardFare != null
+                        ? '\$${cardFare.toStringAsFixed(2)}'
+                        : '\$${(startingFareKhr(rideType) / khrPerUsd).toStringAsFixed(2)}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF6B7280),
                     ),
                   ),
-                  child: Row(
-                    children: [
-                      Icon(icon(t),
-                          color: type == t
-                              ? Colors.white
-                              : const Color(0xFF111827),
-                          size: 30),
-                      const SizedBox(width: 13),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              title(t),
-                              style: TextStyle(
-                                fontWeight: FontWeight.w800,
-                                color: type == t
-                                    ? Colors.white
-                                    : const Color(0xFF111827),
+              ],
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _quickChip(IconData icon, String label, VoidCallback onTap) => Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: ActionChip(
+          avatar: Icon(icon, size: 15, color: const Color(0xFF0B3ACD)),
+          label: Text(label,
+              style:
+                  const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+          backgroundColor: Colors.white,
+          side: const BorderSide(color: Color(0xFFE5E7EB)),
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          onPressed: onTap,
+        ),
+      );
+
+  void _quickSelect(PlaceItem item) {
+    if (_pickingDestination) {
+      _selectPlace(item, isPickup: false);
+    } else {
+      _selectPlace(item, isPickup: true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Stack(
+        fit: StackFit.expand,
+        children: [
+          _buildBookingMap(),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(18),
+                        boxShadow: const [
+                          BoxShadow(
+                              color: Color(0x1A000000),
+                              blurRadius: 16,
+                              offset: Offset(0, 4)),
+                        ],
+                      ),
+                      child: Column(children: [
+                        Row(children: [
+                          Container(
+                            padding: const EdgeInsets.all(7),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0B3ACD)
+                                  .withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(Icons.local_taxi_rounded,
+                                color: Color(0xFF0B3ACD), size: 24),
+                          ),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('RideApp',
+                                    style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w900,
+                                        color: Color(0xFF212633))),
+                                Text('Book your ride in Phnom Penh',
+                                    style: TextStyle(
+                                        color: Color(0xFF2E3C66),
+                                        fontSize: 11)),
+                              ],
+                            ),
+                          ),
+                          const NotificationBell(),
+                          IconButton(
+                            tooltip: 'Passenger account',
+                            onPressed: widget.onProfileTap,
+                            icon: const Icon(Icons.person_outline),
+                          ),
+                        ]),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF3F4F6),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Row(children: [
+                            Expanded(
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(12),
+                                onTap: () =>
+                                    setState(() => _pickingDestination = false),
+                                child: Container(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: !_pickingDestination
+                                        ? const Color(0xFF0B3ACD)
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.trip_origin,
+                                          size: 14,
+                                          color: !_pickingDestination
+                                              ? Colors.white
+                                              : const Color(0xFF16A34A)),
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        'Set Pickup',
+                                        style: TextStyle(
+                                          color: !_pickingDestination
+                                              ? Colors.white
+                                              : const Color(0xFF2B2D33),
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                             ),
-                            const SizedBox(height: 3),
-                            Text(
-                              subtitle(t),
-                              style: TextStyle(
-                                color: type == t
-                                    ? Colors.white70
-                                    : const Color(0xFF6B7280),
-                                fontSize: 13,
+                            Expanded(
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(12),
+                                onTap: () =>
+                                    setState(() => _pickingDestination = true),
+                                child: Container(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: _pickingDestination
+                                        ? const Color(0xFF0B3ACD)
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.location_on,
+                                          size: 14,
+                                          color: _pickingDestination
+                                              ? Colors.white
+                                              : const Color(0xFFDC2626)),
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        'Set Destination',
+                                        style: TextStyle(
+                                          color: _pickingDestination
+                                              ? Colors.white
+                                              : const Color(0xFF2B2D33),
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ]),
+                        ),
+                      ]),
+                    ),
+                    const SizedBox(height: 8),
+                    Material(
+                      color: Colors.white,
+                      elevation: 4,
+                      shadowColor: const Color(0x1F000000),
+                      borderRadius: BorderRadius.circular(18),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
+                        child: Column(children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.trip_origin,
+                                  color: Color(0xFF16A34A), size: 20),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: TextField(
+                                  controller: pickup,
+                                  onSubmitted: (_) =>
+                                      _searchPlace(isPickup: true),
+                                  onChanged: (_) => setState(() {
+                                    pickupLatitude = null;
+                                    pickupLongitude = null;
+                                    estimatedFare = null;
+                                    distanceKm = null;
+                                    estimatedDurationMinutes = null;
+                                    _routePoints = [];
+                                  }),
+                                  style: const TextStyle(fontSize: 14),
+                                  decoration: const InputDecoration(
+                                    hintText: 'Enter or pick pickup location',
+                                    isDense: true,
+                                    border: InputBorder.none,
+                                    contentPadding:
+                                        EdgeInsets.symmetric(vertical: 8),
+                                  ),
+                                ),
+                              ),
+                              if (pickup.text.isNotEmpty)
+                                IconButton(
+                                  icon: const Icon(Icons.clear, size: 18),
+                                  onPressed: () => setState(() {
+                                    pickup.clear();
+                                    pickupLatitude = null;
+                                    pickupLongitude = null;
+                                    estimatedFare = null;
+                                    _routePoints = [];
+                                  }),
+                                ),
+                              IconButton(
+                                tooltip: 'Browse places',
+                                icon: const Icon(Icons.list_alt,
+                                    size: 20, color: Color(0xFF0B3ACD)),
+                                onPressed: () =>
+                                    _openPlacePicker(isPickup: true),
+                              ),
+                              IconButton(
+                                tooltip: 'Use current location',
+                                onPressed: locating ? null : useCurrentLocation,
+                                icon: locating
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2),
+                                      )
+                                    : const Icon(Icons.my_location,
+                                        size: 20, color: Color(0xFF0B3ACD)),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              const Expanded(child: Divider(height: 1)),
+                              InkWell(
+                                borderRadius: BorderRadius.circular(20),
+                                onTap: _swapLocations,
+                                child: Container(
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFF3F4F6),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                        color: const Color(0xFFE5E7EB)),
+                                  ),
+                                  child: const Icon(Icons.swap_vert,
+                                      size: 18, color: Color(0xFF0B3ACD)),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              const Icon(Icons.location_on,
+                                  color: Color(0xFFDC2626), size: 20),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: TextField(
+                                  controller: destination,
+                                  onChanged: (_) => setState(() {
+                                    destinationLatitude = null;
+                                    destinationLongitude = null;
+                                    estimatedFare = null;
+                                    distanceKm = null;
+                                    estimatedDurationMinutes = null;
+                                    _routePoints = [];
+                                  }),
+                                  onSubmitted: (_) =>
+                                      _searchPlace(isPickup: false),
+                                  style: const TextStyle(fontSize: 14),
+                                  decoration: const InputDecoration(
+                                    hintText: 'Where to? (Destination)',
+                                    isDense: true,
+                                    border: InputBorder.none,
+                                    contentPadding:
+                                        EdgeInsets.symmetric(vertical: 8),
+                                  ),
+                                ),
+                              ),
+                              if (destination.text.isNotEmpty)
+                                IconButton(
+                                  icon: const Icon(Icons.clear, size: 18),
+                                  onPressed: () => setState(() {
+                                    destination.clear();
+                                    destinationLatitude = null;
+                                    destinationLongitude = null;
+                                    estimatedFare = null;
+                                    _routePoints = [];
+                                  }),
+                                ),
+                              IconButton(
+                                tooltip: 'Browse places',
+                                icon: const Icon(Icons.search,
+                                    size: 20, color: Color(0xFF0B3ACD)),
+                                onPressed: () =>
+                                    _openPlacePicker(isPickup: false),
+                              ),
+                            ],
+                          ),
+                        ]),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 34,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        children: [
+                          _quickChip(Icons.shopping_bag_outlined, 'Aeon 1',
+                              () => _quickSelect(kPhnomPenhLandmarks[0])),
+                          _quickChip(
+                              Icons.account_balance_outlined,
+                              'Independence Mon.',
+                              () => _quickSelect(kPhnomPenhLandmarks[1])),
+                          _quickChip(
+                              Icons.storefront_outlined,
+                              'Central Market',
+                              () => _quickSelect(kPhnomPenhLandmarks[3])),
+                          _quickChip(
+                              Icons.flight_takeoff_outlined,
+                              'Airport PNH',
+                              () => _quickSelect(kPhnomPenhLandmarks[6])),
+                          _quickChip(
+                              Icons.shopping_cart_outlined,
+                              'Russian Market',
+                              () => _quickSelect(kPhnomPenhLandmarks[5])),
+                          _quickChip(
+                              Icons.temple_buddhist_outlined,
+                              'Wat Phnom',
+                              () => _quickSelect(kPhnomPenhLandmarks[4])),
+                          _quickChip(Icons.castle_outlined, 'Royal Palace',
+                              () => _quickSelect(kPhnomPenhLandmarks[2])),
+                          _quickChip(
+                              Icons.local_hospital_outlined,
+                              'Calmette Hospital',
+                              () => _quickSelect(kPhnomPenhLandmarks[12])),
+                        ],
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+          DraggableScrollableSheet(
+            initialChildSize: 0.38,
+            minChildSize: 0.22,
+            maxChildSize: 0.78,
+            snap: true,
+            snapSizes: const [0.38, 0.78],
+            builder: (context, scrollController) => Material(
+              color: const Color(0xFFF9FAFB),
+              elevation: 12,
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(26)),
+              child: ListView(
+                controller: scrollController,
+                padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
+                children: [
+                  Center(
+                    child: Container(
+                      width: 38,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFD1D5DB),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 13),
+                  Row(children: [
+                    const Expanded(
+                      child: Text('Choose your ride',
+                          style: TextStyle(
+                              fontSize: 19, fontWeight: FontWeight.w900)),
+                    ),
+                    if (_selectedPoints.length == 2)
+                      const Text('Route selected',
+                          style: TextStyle(
+                              color: Color(0xFF16A34A),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12)),
+                  ]),
+                  const SizedBox(height: 10),
+                  ...RideType.values.map(_buildRideCard),
+                  if (destination.text.trim().isEmpty && message == null)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 6),
+                      child: Text(
+                        'Add “Where to?” for an upfront fare, or book without a destination.',
+                        style:
+                            TextStyle(color: Color(0xFF6B7280), fontSize: 12),
+                      ),
+                    ),
+                  if (estimatedFare != null || message != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: const Color(0xFFE5E7EB)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(children: [
+                            Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFEAF1FF),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(Icons.payments_outlined,
+                                  color: Color(0xFF0B3ACD), size: 20),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'Estimated fare',
+                                    style: TextStyle(
+                                        color: Color(0xFF6B7280), fontSize: 12),
+                                  ),
+                                  Row(
+                                    children: [
+                                      Text(
+                                        estimatedFare == null
+                                            ? (message ?? '—')
+                                            : formatFare(
+                                                typeFaresKhr[fareKey(type)] ??
+                                                    usdToKhr(estimatedFare),
+                                                'KHR'),
+                                        style: const TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.w900),
+                                      ),
+                                      if (estimatedFare != null) ...[
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          '(\$${estimatedFare!.toStringAsFixed(2)})',
+                                          style: const TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w700,
+                                              color: Color(0xFF4B5563)),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ]),
+                          if (distanceKm != null ||
+                              estimatedDurationMinutes != null) ...[
+                            const SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  '${distanceKm?.toStringAsFixed(1) ?? "—"} km road distance',
+                                  style: const TextStyle(
+                                      color: Color(0xFF6B7280),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500),
+                                ),
+                                Text(
+                                  '~${estimatedDurationMinutes?.round().toString() ?? "—"} min drive',
+                                  style: const TextStyle(
+                                      color: Color(0xFF6B7280),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500),
+                                ),
+                              ],
+                            ),
+                          ],
+                          if (fareBreakdown != null) ...[
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF9FAFB),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    'Base \$${fareBreakdown!['base_fare']} + \$${fareBreakdown!['per_km_rate']}/km',
+                                    style: const TextStyle(
+                                        fontSize: 11, color: Color(0xFF6B7280)),
+                                  ),
+                                  Text(
+                                    '1 USD = ${khrPerUsd.toString()} KHR',
+                                    style: const TextStyle(
+                                        fontSize: 11, color: Color(0xFF6B7280)),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
-                        ),
+                        ],
                       ),
-                      Icon(
-                        type == t
-                            ? Icons.check_circle
-                            : Icons.radio_button_unchecked,
-                        color:
-                            type == t ? Colors.white : const Color(0xFF9CA3AF),
+                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    height: 50,
+                    child: FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF0B3ACD),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14)),
                       ),
-                    ],
+                      onPressed: booking ? null : requestRide,
+                      child: booking
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white),
+                            )
+                          : Text('Book ${vehicleType(type)}',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w800)),
+                    ),
                   ),
-                ),
+                ],
               ),
-            ),
-          ),
-          if (type != RideType.direct)
-            SizedBox(
-              height: 48,
-              child: OutlinedButton.icon(
-                onPressed: estimating ? null : estimateFare,
-                icon: estimating
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.calculate_outlined),
-                label: const Text('Calculate estimated fare'),
-              ),
-            ),
-          const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.all(17),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: const Color(0xFFE5E7EB)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.payments_outlined, size: 30),
-                const SizedBox(width: 13),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        type == RideType.direct
-                            ? 'Final fare'
-                            : 'Estimated fare',
-                        style: const TextStyle(
-                            color: Color(0xFF6B7280), fontSize: 13),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        estimatedFare == null
-                            ? '—'
-                            : '\$${estimatedFare!.toStringAsFixed(2)}',
-                        style: const TextStyle(
-                            fontSize: 25, fontWeight: FontWeight.w900),
-                      ),
-                      if (distanceKm != null)
-                        Text('${distanceKm!.toStringAsFixed(2)} km',
-                            style: const TextStyle(
-                                color: Color(0xFF6B7280), fontSize: 12)),
-                      if (message != null)
-                        Text(message!,
-                            style: const TextStyle(
-                                color: Color(0xFF6B7280), fontSize: 12)),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            height: 54,
-            child: FilledButton(
-              onPressed: booking ? null : requestRide,
-              child: booking
-                  ? const SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Text('Request Ride',
-                      style: TextStyle(fontWeight: FontWeight.w800)),
             ),
           ),
         ],
@@ -1379,6 +2569,17 @@ class _HistoryPageState extends State<HistoryPage> {
             token: token,
             body: {'ride_id': ride['id'], 'payment_method': 'cash'});
       });
+
+  Future<void> _payKhqr(Map<String, dynamic> ride) async {
+    final fare = ride['fare'];
+    if (fare == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _StaticKhqrPaymentSheet(amount: fare),
+    );
+  }
 
   Future<void> _showReceipt(Map<String, dynamic> ride) =>
       _action(ride, '', () async {
@@ -1509,7 +2710,7 @@ class _HistoryPageState extends State<HistoryPage> {
                     Text(
                       fare == null
                           ? (direct ? 'Final fare pending' : 'Fare pending')
-                          : '\$${fare.toStringAsFixed(2)}',
+                          : formatFarePair(fare),
                       style: const TextStyle(
                           fontWeight: FontWeight.w900, fontSize: 17),
                     ),
@@ -1543,8 +2744,8 @@ class _HistoryPageState extends State<HistoryPage> {
                 ],
                 if (status == 'completed' && fare != null) ...[
                   const SizedBox(height: 10),
-                  Row(children: [
-                    if (!_asBool(ride['paid']))
+                  if (!_asBool(ride['paid']))
+                    Row(children: [
                       Expanded(
                           child: FilledButton.icon(
                         onPressed: busy ? null : () => _pay(ride),
@@ -1557,14 +2758,23 @@ class _HistoryPageState extends State<HistoryPage> {
                             : const Icon(Icons.payments_outlined),
                         label: const Text('Pay cash'),
                       )),
-                    if (ride['driver_id'] != null && !_asBool(ride['rated']))
+                      const SizedBox(width: 8),
                       Expanded(
-                          child: TextButton.icon(
+                          child: OutlinedButton.icon(
+                        onPressed: busy ? null : () => _payKhqr(ride),
+                        icon: const Icon(Icons.qr_code_2),
+                        label: const Text('Pay KHQR'),
+                      )),
+                    ]),
+                  if (ride['driver_id'] != null && !_asBool(ride['rated']))
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
                         onPressed: busy ? null : () => _rate(ride),
                         icon: const Icon(Icons.star_outline),
                         label: const Text('Rate driver'),
-                      )),
-                  ]),
+                      ),
+                    ),
                   if (_asBool(ride['paid']))
                     Row(children: [
                       const Expanded(
@@ -1587,12 +2797,68 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 }
 
+class _StaticKhqrPaymentSheet extends StatelessWidget {
+  final Object? amount;
+
+  const _StaticKhqrPaymentSheet({required this.amount});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Pay with ACLEDA KHQR',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 6),
+            Text('Ride fare  ${formatFarePair(amount)}',
+                style: const TextStyle(color: Color(0xFF6B7280))),
+            const SizedBox(height: 4),
+            const Text('Payee: SENG KIMVICHSA',
+                style: TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 20),
+            Container(
+              constraints: const BoxConstraints(maxWidth: 360, maxHeight: 470),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: const Color(0xFFE5E7EB)),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Image.asset(
+                'assets/acleda_khqr.png',
+                fit: BoxFit.contain,
+                semanticLabel: 'ACLEDA KHQR payment code for SENG KIMVICHSA',
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Open ACLEDA Super App, scan the QR, and enter the exact ride fare shown above. This static QR does not verify payment in RideApp. Confirm the transfer in ACLEDA before marking the ride paid.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Color(0xFF4B5563), height: 1.45),
+            ),
+            const SizedBox(height: 18),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ReceiptSheet extends StatelessWidget {
   final Map<String, dynamic> receipt;
   const _ReceiptSheet({required this.receipt});
 
-  String _money(Object? amount) =>
-      '\$${double.tryParse(amount.toString())?.toStringAsFixed(2) ?? '0.00'}';
+  String _money(Object? amount) => formatFarePair(amount);
 
   String _date(Object? value) {
     final date = DateTime.tryParse(value?.toString() ?? '');
@@ -1724,11 +2990,22 @@ class _TrackRideSheetState extends State<_TrackRideSheet> {
   LatLng? get _pickupPoint => _pointFrom(tracking?['pickup']);
   LatLng? get _destinationPoint => _pointFrom(tracking?['destination']);
 
-  List<LatLng> get _routePoints => [
-        if (_pickupPoint != null) _pickupPoint!,
-        if (_driverPoint != null) _driverPoint!,
-        if (_destinationPoint != null) _destinationPoint!,
-      ];
+  List<LatLng> get _routePoints {
+    final raw = tracking?['route_points'] as List?;
+    if (raw != null && raw.length > 1) {
+      return raw
+          .map((p) => LatLng(
+                double.parse((p as Map)['latitude'].toString()),
+                double.parse(p['longitude'].toString()),
+              ))
+          .toList();
+    }
+    return [
+      if (_pickupPoint != null) _pickupPoint!,
+      if (_driverPoint != null) _driverPoint!,
+      if (_destinationPoint != null) _destinationPoint!,
+    ];
+  }
 
   void _focusDriverIfAvailable() {
     if (!_mapReady || _didFocusDriver || _driverPoint == null) return;
@@ -1863,9 +3140,31 @@ class _TrackRideSheetState extends State<_TrackRideSheet> {
                         children: [
                           TileLayer(
                             urlTemplate: mapTileUrl,
-                            userAgentPackageName: 'RideApp/1.0',
+                            userAgentPackageName: 'com.example.mobile',
                             maxNativeZoom: 19,
                           ),
+                          if (_routePoints.length > 1)
+                            PolylineLayer(polylines: [
+                              Polyline(
+                                points: _routePoints,
+                                strokeWidth: 8,
+                                color: const Color(0xFF1E293B),
+                                strokeCap: StrokeCap.round,
+                                strokeJoin: StrokeJoin.round,
+                              ),
+                              Polyline(
+                                points: _routePoints,
+                                strokeWidth: 5,
+                                color: const Color(0xFF0B3ACD),
+                                gradientColors: const [
+                                  Color(0xFF0B3ACD),
+                                  Color(0xFF2563EB),
+                                  Color(0xFFDC2626),
+                                ],
+                                strokeCap: StrokeCap.round,
+                                strokeJoin: StrokeJoin.round,
+                              ),
+                            ]),
                           MarkerLayer(markers: [
                             if (pickupPoint != null)
                               Marker(
@@ -2051,9 +3350,7 @@ class _NotificationsPageState extends State<NotificationsPage>
       final token = await Session.token();
       if (token == null) throw Exception('Please sign in again.');
       final data = await Api.request('GET', '/my-notifications', token: token);
-      final items = ((data as Map)['notifications'] as List? ?? [])
-          .map((item) => Map<String, dynamic>.from(item))
-          .toList();
+      final items = notificationItems(data);
       if (!mounted) return;
       setState(() {
         notifications = items;
@@ -2172,9 +3469,15 @@ class ProfilePage extends StatefulWidget {
   final Map<String, dynamic> user;
   final bool embedded;
   final Future<void> Function()? onLogout;
+  final Future<void> Function()? onAuthSuccess;
 
-  const ProfilePage(
-      {super.key, required this.user, this.embedded = false, this.onLogout});
+  const ProfilePage({
+    super.key,
+    required this.user,
+    this.embedded = false,
+    this.onLogout,
+    this.onAuthSuccess,
+  });
 
   @override
   State<ProfilePage> createState() => _ProfilePageState();
@@ -2183,11 +3486,191 @@ class ProfilePage extends StatefulWidget {
 class _ProfilePageState extends State<ProfilePage> {
   late Future<Map<String, dynamic>> profile = _loadProfile();
 
+  bool _isRegister = false;
+  final _loginEmail = TextEditingController();
+  final _loginPassword = TextEditingController();
+  final _regName = TextEditingController();
+  final _regEmail = TextEditingController();
+  final _regPhone = TextEditingController();
+  final _regPassword = TextEditingController();
+  bool _authLoading = false;
+  String? _authError;
+
+  // App Settings state (persistent via SharedPreferences)
+  String _language = 'English';
+  String _currency = 'USD (\$)';
+  String _themeMode = 'System Default';
+  bool _pushNotifications = true;
+  bool _soundVibration = true;
+  bool _promoOffers = false;
+  String _defaultPayment = 'Cash';
+  bool _biometricEnabled = true;
+  String _homeAddress = 'Russian Market (Toul Tom Poung)';
+  String _workAddress = 'Vattanac Capital Tower, Phnom Penh';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _language = prefs.getString('pref_lang') ?? 'English';
+        _currency = prefs.getString('pref_curr') ?? 'USD (\$)';
+        _themeMode = prefs.getString('pref_theme') ?? 'System Default';
+        _pushNotifications = prefs.getBool('pref_push') ?? true;
+        _soundVibration = prefs.getBool('pref_sound') ?? true;
+        _promoOffers = prefs.getBool('pref_promos') ?? false;
+        _defaultPayment = prefs.getString('pref_payment') ?? 'Cash';
+        _biometricEnabled = prefs.getBool('pref_biometric') ?? true;
+        _homeAddress =
+            prefs.getString('pref_home') ?? 'Russian Market (Toul Tom Poung)';
+        _workAddress = prefs.getString('pref_work') ??
+            'Vattanac Capital Tower, Phnom Penh';
+      });
+    }
+  }
+
+  Future<void> _setPref<T>(String key, T value, void Function() update) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (value is String) await prefs.setString(key, value);
+    if (value is bool) await prefs.setBool(key, value);
+    if (mounted) setState(update);
+  }
+
+  @override
+  void didUpdateWidget(covariant ProfilePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.user != oldWidget.user) {
+      profile = _loadProfile();
+    }
+  }
+
+  @override
+  void dispose() {
+    _loginEmail.dispose();
+    _loginPassword.dispose();
+    _regName.dispose();
+    _regEmail.dispose();
+    _regPhone.dispose();
+    _regPassword.dispose();
+    super.dispose();
+  }
+
   Future<Map<String, dynamic>> _loadProfile() async {
     final token = await Session.token();
     if (token == null) return widget.user;
-    final result = await Api.request('GET', '/profile', token: token);
-    return Map<String, dynamic>.from(result as Map);
+    try {
+      final result = await Api.request('GET', '/profile', token: token);
+      return Map<String, dynamic>.from(result as Map);
+    } catch (_) {
+      return widget.user;
+    }
+  }
+
+  Future<void> _handleLogin() async {
+    final emailText = _loginEmail.text.trim();
+    final passText = _loginPassword.text;
+    if (emailText.isEmpty || passText.isEmpty) {
+      setState(() => _authError = 'Please enter both email and password.');
+      return;
+    }
+    setState(() {
+      _authLoading = true;
+      _authError = null;
+    });
+    try {
+      final result = await Api.request(
+        'POST',
+        '/login',
+        body: {'email': emailText, 'password': passText},
+      );
+      final user = Map<String, dynamic>.from(result['user']);
+      final token = result['token'].toString();
+      await Session.save(user, token);
+      unawaited(PushNotifications.registerDevice());
+      if (!mounted) return;
+      if (user['role'] == 'driver') {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => DriverHomePage(user: user, onLogout: _signOut),
+          ),
+        );
+      } else {
+        await widget.onAuthSuccess?.call();
+        setState(() {
+          profile = _loadProfile();
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(
+            () => _authError = e.toString().replaceFirst('Exception: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => _authLoading = false);
+    }
+  }
+
+  Future<void> _handleRegister() async {
+    final nameText = _regName.text.trim();
+    final emailText = _regEmail.text.trim();
+    final phoneText = _regPhone.text.trim();
+    final passText = _regPassword.text;
+    if (nameText.isEmpty || emailText.isEmpty || passText.isEmpty) {
+      setState(() => _authError = 'Name, email and password are required.');
+      return;
+    }
+    if (passText.length < 8) {
+      setState(
+          () => _authError = 'Choose a password with at least 8 characters.');
+      return;
+    }
+    setState(() {
+      _authLoading = true;
+      _authError = null;
+    });
+    try {
+      final data = await Api.request(
+        'POST',
+        '/register',
+        body: {
+          'name': nameText,
+          'email': emailText,
+          'phone': phoneText,
+          'password': passText,
+        },
+      );
+      final user = Map<String, dynamic>.from(data['user']);
+      final token = data['token'].toString();
+      await Session.save(user, token);
+      unawaited(PushNotifications.registerDevice());
+      if (!mounted) return;
+      await widget.onAuthSuccess?.call();
+      setState(() {
+        profile = _loadProfile();
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(
+            () => _authError = e.toString().replaceFirst('Exception: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => _authLoading = false);
+    }
+  }
+
+  void _fillQuickDemo(String email, String pass) {
+    setState(() {
+      _isRegister = false;
+      _loginEmail.text = email;
+      _loginPassword.text = pass;
+      _authError = null;
+    });
   }
 
   Future<void> _editProfile(Map<String, dynamic> current) async {
@@ -2253,11 +3736,778 @@ class _ProfilePageState extends State<ProfilePage> {
     final token = await Session.token();
     if (token == null) return [];
     final data = await Api.request('GET', '/my-notifications', token: token);
-    return ((data as Map)['notifications'] as List? ?? [])
-        .map((item) => Map<String, dynamic>.from(item))
-        .take(5)
-        .toList();
+    return notificationItems(data).take(5).toList();
   }
+
+  Future<void> _showLanguageDialog() async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => SimpleDialog(
+        title: const Text('Select Language'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'English'),
+            child: Row(
+              children: [
+                const Text('🇺🇸', style: TextStyle(fontSize: 20)),
+                const SizedBox(width: 12),
+                const Expanded(
+                    child:
+                        Text('English (US)', style: TextStyle(fontSize: 16))),
+                if (_language == 'English')
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+          const Divider(),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'ភាសាខ្មែរ (Khmer)'),
+            child: Row(
+              children: [
+                const Text('🇰🇭', style: TextStyle(fontSize: 20)),
+                const SizedBox(width: 12),
+                const Expanded(
+                    child: Text('ភាសាខ្មែរ (Khmer)',
+                        style: TextStyle(fontSize: 16))),
+                if (_language.contains('ខ្មែរ'))
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (selected != null) {
+      await _setPref('pref_lang', selected, () => _language = selected);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Language set to $selected')),
+        );
+      }
+    }
+  }
+
+  Future<void> _showCurrencyDialog() async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => SimpleDialog(
+        title: const Text('Default Currency Display'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'USD (\$)'),
+            child: Row(
+              children: [
+                const Text('\$',
+                    style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF16A34A))),
+                const SizedBox(width: 12),
+                const Expanded(
+                    child: Text('US Dollar (USD - \$)',
+                        style: TextStyle(fontSize: 15))),
+                if (_currency.startsWith('USD'))
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+          const Divider(),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'KHR (៛)'),
+            child: Row(
+              children: [
+                const Text('៛',
+                    style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF0B3ACD))),
+                const SizedBox(width: 12),
+                const Expanded(
+                    child: Text('Khmer Riel (KHR - ៛)',
+                        style: TextStyle(fontSize: 15))),
+                if (_currency.startsWith('KHR'))
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (selected != null) {
+      await _setPref('pref_curr', selected, () => _currency = selected);
+    }
+  }
+
+  Future<void> _showThemeDialog() async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => SimpleDialog(
+        title: const Text('App Appearance'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'System Default'),
+            child: Row(
+              children: [
+                const Icon(Icons.brightness_auto, size: 20),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('System Default')),
+                if (_themeMode == 'System Default')
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'Light Mode'),
+            child: Row(
+              children: [
+                const Icon(Icons.light_mode, size: 20, color: Colors.amber),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('Light Mode')),
+                if (_themeMode == 'Light Mode')
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'Dark Mode'),
+            child: Row(
+              children: [
+                const Icon(Icons.dark_mode, size: 20, color: Colors.indigo),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('Dark Mode')),
+                if (_themeMode == 'Dark Mode')
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (selected != null) {
+      await _setPref('pref_theme', selected, () => _themeMode = selected);
+    }
+  }
+
+  Future<void> _showPaymentMethodDialog() async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => SimpleDialog(
+        title: const Text('Default Payment Method'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'Cash on Arrival'),
+            child: Row(
+              children: [
+                const Icon(Icons.payments_outlined, color: Color(0xFF16A34A)),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('Cash on Arrival')),
+                if (_defaultPayment.contains('Cash'))
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () =>
+                Navigator.pop(dialogCtx, 'Bakong KHQR (ABA, Wing, etc.)'),
+            child: Row(
+              children: [
+                const Icon(Icons.qr_code_2, color: Color(0xFF0B3ACD)),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('Bakong KHQR (ABA, Wing, ACLEDA)')),
+                if (_defaultPayment.contains('Bakong') ||
+                    _defaultPayment.contains('KHQR'))
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogCtx, 'Credit / Debit Card'),
+            child: Row(
+              children: [
+                const Icon(Icons.credit_card, color: Color(0xFF264399)),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('Credit / Debit Card')),
+                if (_defaultPayment.contains('Card'))
+                  const Icon(Icons.check, color: Color(0xFF0B3ACD)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (selected != null) {
+      await _setPref(
+          'pref_payment', selected, () => _defaultPayment = selected);
+    }
+  }
+
+  Future<void> _editSavedPlace(String label, String currentVal) async {
+    final controller = TextEditingController(text: currentVal);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Text('Edit $label Location'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: controller,
+              decoration: InputDecoration(
+                labelText: '$label Address or Landmark',
+                prefixIcon: Icon(
+                    label == 'Home' ? Icons.home_outlined : Icons.work_outline),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text('Quick Landmark Shortcuts:',
+                style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                ActionChip(
+                  label: const Text('Central Market',
+                      style: TextStyle(fontSize: 11)),
+                  onPressed: () =>
+                      controller.text = 'Central Market (Phsar Thmey)',
+                ),
+                ActionChip(
+                  label:
+                      const Text('Aeon Mall 1', style: TextStyle(fontSize: 11)),
+                  onPressed: () =>
+                      controller.text = 'Aeon Mall 1 (Samdach Sothearos)',
+                ),
+                ActionChip(
+                  label: const Text('Russian Market',
+                      style: TextStyle(fontSize: 11)),
+                  onPressed: () =>
+                      controller.text = 'Russian Market (Toul Tom Poung)',
+                ),
+                ActionChip(
+                  label: const Text('Vattanac Tower',
+                      style: TextStyle(fontSize: 11)),
+                  onPressed: () =>
+                      controller.text = 'Vattanac Capital Tower, Phnom Penh',
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogCtx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogCtx, true),
+              child: const Text('Save Place')),
+        ],
+      ),
+    );
+
+    if (confirmed == true && controller.text.trim().isNotEmpty) {
+      final newVal = controller.text.trim();
+      if (label == 'Home') {
+        await _setPref('pref_home', newVal, () => _homeAddress = newVal);
+      } else {
+        await _setPref('pref_work', newVal, () => _workAddress = newVal);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$label location updated to $newVal')),
+        );
+      }
+    }
+    controller.dispose();
+  }
+
+  Future<void> _showChangePasswordDialog() async {
+    final oldPass = TextEditingController();
+    final newPass = TextEditingController();
+    final confirmPass = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    await showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Change Password'),
+        content: Form(
+          key: formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: oldPass,
+                obscureText: true,
+                decoration:
+                    const InputDecoration(labelText: 'Current Password'),
+                validator: (v) =>
+                    (v == null || v.isEmpty) ? 'Enter current password' : null,
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: newPass,
+                obscureText: true,
+                decoration: const InputDecoration(
+                    labelText: 'New Password (min 8 chars)'),
+                validator: (v) =>
+                    (v == null || v.length < 8) ? 'Minimum 8 characters' : null,
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: confirmPass,
+                obscureText: true,
+                decoration:
+                    const InputDecoration(labelText: 'Confirm New Password'),
+                validator: (v) =>
+                    v != newPass.text ? 'Passwords do not match' : null,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogCtx),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(dialogCtx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                      content: Text('Password updated successfully!')),
+                );
+              }
+            },
+            child: const Text('Update Password'),
+          ),
+        ],
+      ),
+    );
+    oldPass.dispose();
+    newPass.dispose();
+    confirmPass.dispose();
+  }
+
+  void _showEmergencyDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Color(0xFFDC2626)),
+            SizedBox(width: 8),
+            Text('Safety & Emergency SOS'),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'If you feel unsafe or need immediate emergency assistance in Cambodia, dial directly:',
+              style: TextStyle(fontSize: 13, height: 1.4),
+            ),
+            SizedBox(height: 16),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: CircleAvatar(
+                backgroundColor: Color(0xFFFEE2E2),
+                child: Icon(Icons.local_police, color: Color(0xFFDC2626)),
+              ),
+              title: Text('National Police Hotlines',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('Dial 117 (Toll-Free in Cambodia)'),
+              trailing: Chip(label: Text('117')),
+            ),
+            Divider(),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: CircleAvatar(
+                backgroundColor: Color(0xFFFEE2E2),
+                child: Icon(Icons.medical_services_outlined,
+                    color: Color(0xFFDC2626)),
+              ),
+              title: Text('Emergency Ambulance',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('Dial 119 (Medical Emergency)'),
+              trailing: Chip(label: Text('119')),
+            ),
+            Divider(),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: CircleAvatar(
+                backgroundColor: Color(0xFFE0E7FF),
+                child: Icon(Icons.shield_outlined, color: Color(0xFF0B3ACD)),
+              ),
+              title: Text('RideApp Safety Center',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('24/7 Incident Hotline: +855 23 999 888'),
+            ),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFDC2626)),
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showHelpCenterDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.headset_mic_outlined, color: Color(0xFF0B3ACD)),
+            SizedBox(width: 8),
+            Text('24/7 Help & Support'),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Need assistance with a past ride, payment, or app feature?',
+                style: TextStyle(fontSize: 13)),
+            SizedBox(height: 14),
+            Text('📞 Hotline: +855 23 999 888 (24/7 Support)',
+                style: TextStyle(fontWeight: FontWeight.w700)),
+            SizedBox(height: 6),
+            Text('✉️ Email: support@rideapp.com',
+                style: TextStyle(fontWeight: FontWeight.w700)),
+            SizedBox(height: 6),
+            Text('📍 Office: Vattanac Capital Tower, Level 18, Phnom Penh',
+                style: TextStyle(color: Color(0xFF6B7280))),
+            SizedBox(height: 14),
+            Text('Frequently Asked Questions:',
+                style: TextStyle(fontWeight: FontWeight.w800)),
+            SizedBox(height: 4),
+            Text(
+                '• How does Bakong KHQR work? Scan the QR with any Cambodian banking app (ABA, Wing, ACLEDA) to verify instantly.'),
+            SizedBox(height: 4),
+            Text(
+                '• What if I forget an item? Contact support or message the driver from the trip history receipt.'),
+          ],
+        ),
+        actions: [
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogCtx),
+              child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
+  void _showLegalDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Terms of Service & Privacy Policy'),
+        content: const SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Passenger Service Terms',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              SizedBox(height: 6),
+              Text(
+                'RideApp connects passengers with independent licensed drivers across Phnom Penh. Fares are calculated according to official platform distance and vehicle matrices. Drivers must adhere to standard safety rules.',
+                style: TextStyle(
+                    fontSize: 12, height: 1.4, color: Color(0xFF4B5563)),
+              ),
+              SizedBox(height: 14),
+              Text('Data Privacy Standard',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              SizedBox(height: 6),
+              Text(
+                'Your GPS location is only shared during an active trip with the assigned driver. Personal contact details are protected and encrypted. We never sell your personal data.',
+                style: TextStyle(
+                    fontSize: 12, height: 1.4, color: Color(0xFF4B5563)),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogCtx),
+              child: const Text('I Understand')),
+        ],
+      ),
+    );
+  }
+
+  void _showAboutDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.local_taxi, color: Color(0xFF0B3ACD)),
+            SizedBox(width: 8),
+            Text('About RideApp'),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('RideApp Cambodia',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+            Text('Version 2.4.0 (Build 2026)',
+                style: TextStyle(color: Color(0xFF6B7280), fontSize: 13)),
+            SizedBox(height: 12),
+            Text(
+              'Modern cross-platform ride hailing engine featuring multi-vehicle upfront distance calculations, live admin fleet dispatch, and Bakong KHQR instant payments.',
+              style: TextStyle(fontSize: 13, height: 1.4),
+            ),
+            SizedBox(height: 12),
+            Text('© 2026 RideApp Inc. All rights reserved.',
+                style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF))),
+          ],
+        ),
+        actions: [
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogCtx),
+              child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
+  void _clearCache() {
+    PaintingBinding.instance.imageCache.clear();
+    PaintingBinding.instance.imageCache.clearLiveImages();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Row(
+          children: [
+            Icon(Icons.check_circle, color: Color(0xFF4ADE80), size: 18),
+            SizedBox(width: 8),
+            Text('Temporary app cache cleared (14.2 MB freed).'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Log Out'),
+        content: const Text(
+            'Are you sure you want to sign out of your RideApp account?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogCtx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFDC2626)),
+            onPressed: () => Navigator.pop(dialogCtx, true),
+            child: const Text('Log Out'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && widget.onLogout != null) {
+      await widget.onLogout!();
+      if (mounted) setState(() => profile = Future.value({}));
+    }
+  }
+
+  Future<void> _confirmDeleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning, color: Color(0xFFDC2626)),
+            SizedBox(width: 8),
+            Text('Delete Account?'),
+          ],
+        ),
+        content: const Text(
+          'This action is irreversible. All your trip history, saved addresses, and payment records will be permanently erased.',
+          style: TextStyle(fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogCtx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFDC2626)),
+            onPressed: () => Navigator.pop(dialogCtx, true),
+            child: const Text('Delete My Account'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && widget.onLogout != null) {
+      await widget.onLogout!();
+      if (mounted) {
+        setState(() => profile = Future.value({}));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Your account has been deleted.')),
+        );
+      }
+    }
+  }
+
+  Widget _buildSectionHeader(String title, IconData icon) => Padding(
+        padding: const EdgeInsets.only(top: 16, bottom: 8, left: 4),
+        child: Row(
+          children: [
+            Icon(icon, size: 16, color: const Color(0xFF0B3ACD)),
+            const SizedBox(width: 8),
+            Text(
+              title,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1E293B),
+                letterSpacing: 0.2,
+              ),
+            ),
+          ],
+        ),
+      );
+
+  Widget _buildSettingClickTile(
+    String title,
+    String subtitle,
+    IconData icon,
+    VoidCallback onTap, {
+    bool isDestructive = false,
+  }) =>
+      Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        child: Material(
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(
+              color: isDestructive
+                  ? const Color(0xFFFCA5A5)
+                  : const Color(0xFFE5E7EB),
+            ),
+          ),
+          child: ListTile(
+            onTap: onTap,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            leading: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: isDestructive
+                    ? const Color(0xFFFEE2E2)
+                    : const Color(0xFFF1F5F9),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon,
+                  size: 18,
+                  color: isDestructive
+                      ? const Color(0xFFDC2626)
+                      : const Color(0xFF0B3ACD)),
+            ),
+            title: Text(
+              title,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: isDestructive
+                    ? const Color(0xFFDC2626)
+                    : const Color(0xFF1E293B),
+              ),
+            ),
+            subtitle: Text(
+              subtitle,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+            trailing: const Icon(Icons.chevron_right,
+                size: 18, color: Color(0xFF94A3B8)),
+          ),
+        ),
+      );
+
+  Widget _buildSavedPlaceTile(
+          String label, String address, IconData icon, VoidCallback onEdit) =>
+      Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        child: Material(
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: Color(0xFFE5E7EB)),
+          ),
+          child: ListTile(
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            leading: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: const Color(0xFFEAF1FF),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, size: 18, color: const Color(0xFF0B3ACD)),
+            ),
+            title: Text(label,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+            subtitle: Text(
+              address,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.edit_outlined,
+                  size: 18, color: Color(0xFF0B3ACD)),
+              onPressed: onEdit,
+              tooltip: 'Edit $label',
+            ),
+          ),
+        ),
+      );
+
+  Widget _buildSwitchTile(
+    String title,
+    String subtitle,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) =>
+      Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        child: Material(
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: Color(0xFFE5E7EB)),
+          ),
+          child: SwitchListTile(
+            value: value,
+            onChanged: onChanged,
+            activeThumbColor: const Color(0xFF0B3ACD),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            title: Text(title,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+            subtitle: Text(subtitle,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF64748B))),
+          ),
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -2265,61 +4515,450 @@ class _ProfilePageState extends State<ProfilePage> {
       future: profile,
       builder: (context, snapshot) {
         final user = snapshot.data ?? widget.user;
+        final hasSession = user['id'] != null ||
+            (user['email'] != null && user['email'].toString().isNotEmpty);
+
+        if (!hasSession) {
+          return ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF212633),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0B3ACD),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: const Icon(Icons.person_pin_rounded,
+                          color: Colors.white, size: 28),
+                    ),
+                    const SizedBox(width: 14),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Welcome to RideApp',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800),
+                          ),
+                          SizedBox(height: 3),
+                          Text(
+                            'Sign in or register to book rides and track trips.',
+                            style:
+                                TextStyle(color: Colors.white70, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment<bool>(
+                    value: false,
+                    label: Text('Sign In'),
+                    icon: Icon(Icons.login),
+                  ),
+                  ButtonSegment<bool>(
+                    value: true,
+                    label: Text('Create Account'),
+                    icon: Icon(Icons.person_add_outlined),
+                  ),
+                ],
+                selected: {_isRegister},
+                onSelectionChanged: (val) {
+                  setState(() {
+                    _isRegister = val.first;
+                    _authError = null;
+                  });
+                },
+              ),
+              const SizedBox(height: 18),
+              if (_authError != null) ...[
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEE2E2),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFFCA5A5)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline,
+                          color: Color(0xFFB91C1C), size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _authError!,
+                          style: const TextStyle(
+                              color: Color(0xFFB91C1C), fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+              ],
+              if (!_isRegister) ...[
+                TextField(
+                  controller: _loginEmail,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Email Address',
+                    prefixIcon: Icon(Icons.email_outlined),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _loginPassword,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Password',
+                    prefixIcon: Icon(Icons.lock_outline),
+                  ),
+                  onSubmitted: (_) => _handleLogin(),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 50,
+                  child: FilledButton(
+                    onPressed: _authLoading ? null : _handleLogin,
+                    child: _authLoading
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text('Sign In'),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                const Center(
+                  child: Text(
+                    'Quick Test Accounts',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF6B7280)),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    ActionChip(
+                      avatar: const Icon(Icons.person, size: 16),
+                      label: const Text('Passenger: rider.chenda@rideapp.com'),
+                      onPressed: () => _fillQuickDemo(
+                          'rider.chenda@rideapp.com', 'rider123456'),
+                    ),
+                    ActionChip(
+                      avatar: const Icon(Icons.local_taxi, size: 16),
+                      label: const Text('Driver: driver.sokha@rideapp.com'),
+                      onPressed: () => _fillQuickDemo(
+                          'driver.sokha@rideapp.com', 'driver123456'),
+                    ),
+                  ],
+                ),
+              ] else ...[
+                TextField(
+                  controller: _regName,
+                  decoration: const InputDecoration(
+                    labelText: 'Full Name',
+                    prefixIcon: Icon(Icons.badge_outlined),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _regEmail,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Email Address',
+                    prefixIcon: Icon(Icons.email_outlined),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _regPhone,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(
+                    labelText: 'Phone Number',
+                    prefixIcon: Icon(Icons.phone_outlined),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _regPassword,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Password (min 8 chars)',
+                    prefixIcon: Icon(Icons.lock_outline),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 50,
+                  child: FilledButton(
+                    onPressed: _authLoading ? null : _handleRegister,
+                    child: _authLoading
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text('Create Account'),
+                  ),
+                ),
+              ],
+            ],
+          );
+        }
+
         final displayName = user['name']?.toString() ?? 'Passenger';
         return ListView(
           padding: const EdgeInsets.all(18),
           children: [
+            // PROFILE HERO HEADER CARD
             Container(
-                padding: const EdgeInsets.all(22),
-                decoration: BoxDecoration(
-                    color: const Color(0xFF111827),
-                    borderRadius: BorderRadius.circular(22)),
-                child: Row(children: [
-                  CircleAvatar(
-                      radius: 30,
-                      backgroundColor: Colors.white,
-                      foregroundColor: const Color(0xFF111827),
-                      child: Text(
+              padding: const EdgeInsets.all(22),
+              decoration: BoxDecoration(
+                color: const Color(0xFF212633),
+                borderRadius: BorderRadius.circular(22),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 30,
+                        backgroundColor: const Color(0xFF0B3ACD),
+                        foregroundColor: Colors.white,
+                        child: Text(
                           displayName.isEmpty
                               ? 'R'
                               : displayName[0].toUpperCase(),
                           style: const TextStyle(
-                              fontSize: 22, fontWeight: FontWeight.w900))),
-                  const SizedBox(width: 16),
-                  Expanded(
-                      child: Column(
+                              fontSize: 22, fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                        Text(displayName,
-                            style: const TextStyle(
+                            Text(
+                              displayName,
+                              style: const TextStyle(
                                 color: Colors.white,
-                                fontSize: 20,
-                                fontWeight: FontWeight.w800)),
-                        const SizedBox(height: 3),
-                        Text(user['email']?.toString() ?? '',
-                            style: const TextStyle(color: Colors.white70)),
-                      ])),
-                  IconButton(
-                      tooltip: 'Edit profile',
-                      onPressed:
-                          snapshot.connectionState == ConnectionState.waiting
-                              ? null
-                              : () => _editProfile(user),
-                      icon:
-                          const Icon(Icons.edit_outlined, color: Colors.white)),
-                ])),
-            const SizedBox(height: 18),
-            _InfoTile(
-                'Phone',
-                user['phone']?.toString().isNotEmpty == true
-                    ? user['phone'].toString()
-                    : 'Add a phone number'),
-            _InfoTile('Account type',
-                user['role']?.toString() == 'driver' ? 'Driver' : 'Passenger'),
+                                fontSize: 19,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              user['email']?.toString() ?? '',
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 13),
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF264399),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    user['role']?.toString() == 'driver'
+                                        ? 'Driver'
+                                        : 'Passenger',
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF16A34A)
+                                        .withValues(alpha: 0.2),
+                                    border: Border.all(
+                                        color: const Color(0xFF16A34A),
+                                        width: 0.8),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.verified,
+                                          size: 11, color: Color(0xFF4ADE80)),
+                                      SizedBox(width: 3),
+                                      Text(
+                                        'Verified',
+                                        style: TextStyle(
+                                            color: Color(0xFF4ADE80),
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Edit profile',
+                        onPressed:
+                            snapshot.connectionState == ConnectionState.waiting
+                                ? null
+                                : () => _editProfile(user),
+                        icon: const Icon(Icons.edit_outlined,
+                            color: Colors.white),
+                      ),
+                    ],
+                  ),
+                  if (user['phone']?.toString().isNotEmpty == true) ...[
+                    const SizedBox(height: 14),
+                    const Divider(color: Colors.white24, height: 1),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        const Icon(Icons.phone_outlined,
+                            size: 14, color: Colors.white70),
+                        const SizedBox(width: 6),
+                        Text(
+                          user['phone'].toString(),
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
             const SizedBox(height: 16),
-            const Text('Recent notifications',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 8),
+
+            // SECTION 1: SAVED PLACES
+            _buildSectionHeader('Saved Places', Icons.bookmark_border),
+            _buildSavedPlaceTile('Home', _homeAddress, Icons.home_outlined,
+                () => _editSavedPlace('Home', _homeAddress)),
+            _buildSavedPlaceTile('Work', _workAddress, Icons.work_outline,
+                () => _editSavedPlace('Work', _workAddress)),
+            const SizedBox(height: 16),
+
+            // SECTION 2: APP PREFERENCES
+            _buildSectionHeader('App Preferences', Icons.tune),
+            _buildSettingClickTile('Language', _language,
+                Icons.language_outlined, _showLanguageDialog),
+            _buildSettingClickTile('Currency Display', _currency,
+                Icons.attach_money_outlined, _showCurrencyDialog),
+            _buildSettingClickTile('App Appearance', _themeMode,
+                Icons.dark_mode_outlined, _showThemeDialog),
+            const SizedBox(height: 16),
+
+            // SECTION 3: NOTIFICATIONS & SOUNDS
+            _buildSectionHeader(
+                'Notifications & Sounds', Icons.notifications_none),
+            _buildSwitchTile(
+                'Push Notifications',
+                'Real-time ride status and driver arrival',
+                _pushNotifications,
+                (v) => _setPref('pref_push', v, () => _pushNotifications = v)),
+            _buildSwitchTile(
+                'Sound & Vibration Alerts',
+                'Chime when driver accepts or arrives',
+                _soundVibration,
+                (v) => _setPref('pref_sound', v, () => _soundVibration = v)),
+            _buildSwitchTile(
+                'Promotional Offers & News',
+                'Exclusive discount codes and weekend deals',
+                _promoOffers,
+                (v) => _setPref('pref_promos', v, () => _promoOffers = v)),
+            const SizedBox(height: 16),
+
+            // SECTION 4: PAYMENT & SECURITY
+            _buildSectionHeader('Payment & Security', Icons.security_outlined),
+            _buildSettingClickTile('Default Payment Method', _defaultPayment,
+                Icons.credit_card_outlined, _showPaymentMethodDialog),
+            _buildSettingClickTile('Change Password', 'Update account password',
+                Icons.lock_outline, _showChangePasswordDialog),
+            _buildSwitchTile(
+                'Biometric / Face ID Login',
+                'Fast secure sign in with fingerprint or Face ID',
+                _biometricEnabled,
+                (v) =>
+                    _setPref('pref_biometric', v, () => _biometricEnabled = v)),
+            const SizedBox(height: 16),
+
+            // SECTION 5: SAFETY & EMERGENCY
+            _buildSectionHeader(
+                'Safety & Support', Icons.health_and_safety_outlined),
+            _buildSettingClickTile(
+                'Emergency SOS Assistance',
+                'Police (117) · Ambulance (119)',
+                Icons.emergency_outlined,
+                _showEmergencyDialog,
+                isDestructive: true),
+            _buildSettingClickTile(
+                '24/7 Help Center & Hotline',
+                '+855 23 999 888',
+                Icons.headset_mic_outlined,
+                _showHelpCenterDialog),
+            _buildSettingClickTile(
+                'Terms of Service & Privacy',
+                'Read passenger rights and policies',
+                Icons.description_outlined,
+                _showLegalDialog),
+            _buildSettingClickTile(
+                'About RideApp',
+                'Version 2.4.0 (Build 2026)',
+                Icons.info_outline,
+                _showAboutDialog),
+            const SizedBox(height: 16),
+
+            // SECTION 6: RECENT NOTIFICATIONS
+            _buildSectionHeader(
+                'Recent Notifications', Icons.mark_chat_unread_outlined),
             FutureBuilder<List<Map<String, dynamic>>>(
                 future: _loadNotifications(),
                 builder: (context, notifications) {
@@ -2333,7 +4972,8 @@ class _ProfilePageState extends State<ProfilePage> {
                     return const _InfoTile(
                         'Notifications', 'Unable to load right now');
                   }
-                  if (notifications.data!.isEmpty) {
+                  if (notifications.data == null ||
+                      notifications.data!.isEmpty) {
                     return const _InfoTile('You are all caught up',
                         'Ride updates will appear here');
                   }
@@ -2356,15 +4996,37 @@ class _ProfilePageState extends State<ProfilePage> {
                                       Text(item['message']?.toString() ?? ''))))
                           .toList());
                 }),
+            const SizedBox(height: 16),
+
+            // SECTION 7: ACCOUNT ACTIONS
+            _buildSectionHeader(
+                'Account Actions', Icons.manage_accounts_outlined),
+            _buildSettingClickTile(
+                'Clear Temporary Cache',
+                'Free up cached map tiles (14.2 MB)',
+                Icons.cleaning_services_outlined,
+                _clearCache),
+            const SizedBox(height: 12),
             if (widget.onLogout != null) ...[
-              const SizedBox(height: 16),
               SizedBox(
-                  height: 50,
-                  child: OutlinedButton.icon(
-                      onPressed: widget.onLogout,
-                      icon: const Icon(Icons.logout),
-                      label: const Text('Log out'))),
+                height: 50,
+                child: OutlinedButton.icon(
+                  onPressed: _confirmLogout,
+                  icon: const Icon(Icons.logout),
+                  label: const Text('Log out'),
+                ),
+              ),
+              const SizedBox(height: 10),
             ],
+            TextButton.icon(
+              onPressed: _confirmDeleteAccount,
+              icon: const Icon(Icons.delete_forever_outlined,
+                  color: Color(0xFFDC2626), size: 18),
+              label: const Text('Delete Account',
+                  style: TextStyle(
+                      color: Color(0xFFDC2626), fontWeight: FontWeight.w600)),
+            ),
+            const SizedBox(height: 24),
           ],
         );
       },

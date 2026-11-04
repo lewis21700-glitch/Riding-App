@@ -28,7 +28,8 @@ def client(monkeypatch):
         """CREATE TABLE users (
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
           phone TEXT DEFAULT '', password TEXT NOT NULL, role TEXT NOT NULL,
-          availability TEXT DEFAULT 'offline', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          availability TEXT DEFAULT 'offline', is_deleted INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )""",
         """CREATE TABLE vehicles (
           id INTEGER PRIMARY KEY AUTOINCREMENT, driver_id INTEGER NOT NULL, vehicle_type TEXT,
@@ -60,6 +61,13 @@ def client(monkeypatch):
         """CREATE TABLE payments (
           id INTEGER PRIMARY KEY AUTOINCREMENT, ride_id INTEGER UNIQUE, amount NUMERIC,
           payment_method TEXT, status TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE payment_intents (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ride_id INTEGER, rider_id INTEGER,
+          provider TEXT DEFAULT 'bakong', amount NUMERIC, currency TEXT DEFAULT 'USD',
+          qr_payload TEXT, qr_md5 TEXT UNIQUE, status TEXT DEFAULT 'pending',
+          expires_at DATETIME, provider_transaction_hash TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )""",
         """CREATE TABLE ratings (
           id INTEGER PRIMARY KEY AUTOINCREMENT, ride_id INTEGER, rater_id INTEGER,
@@ -147,6 +155,8 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert vehicle.status_code == 201
     assert client.put(f"/api/drivers/{driver['id']}/availability", headers=driver_auth,
                       json={"availability": "online"}).status_code == 200
+    assert client.post("/api/driver-location", headers=driver_auth,
+                       json={"latitude": 11.56, "longitude": 104.92}).status_code == 200
     car_driver, car_token = register(client, "driver", "car-only-driver")
     car_auth = auth(car_token)
     assert client.post("/api/my-vehicle", headers=car_auth, json={
@@ -163,6 +173,15 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert client.post("/api/my-vehicle", headers=late_auth, json={
         "vehicle_type": "Tuk Tuk", "vehicle_model": "Late online tuk tuk", "plate_number": "TEST-LATE"
     }).status_code == 201
+    far_driver, far_token = register(client, "driver", "far-away-driver")
+    far_auth = auth(far_token)
+    assert client.post("/api/my-vehicle", headers=far_auth, json={
+        "vehicle_type": "Tuk Tuk", "vehicle_model": "Far away tuk tuk", "plate_number": "TEST-FAR"
+    }).status_code == 201
+    assert client.put(f"/api/drivers/{far_driver['id']}/availability", headers=far_auth,
+                      json={"availability": "online"}).status_code == 200
+    assert client.post("/api/driver-location", headers=far_auth,
+                       json={"latitude": 11.70, "longitude": 105.10}).status_code == 200
 
     coordinate_estimate = client.post("/api/fare/estimate", headers=rider_auth, json={
         "ride_type": "Car",
@@ -174,12 +193,18 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     expected_distance = round(api.distance_between(11.56, 104.92, 11.57, 104.93) * 1.25, 2)
     assert coordinate_estimate.status_code == 200
     assert coordinate_estimate.json()["distance_km"] == expected_distance
+    assert coordinate_estimate.json()["pickup_lat"] == 11.56
+    assert coordinate_estimate.json()["destination_lng"] == 104.93
+    assert coordinate_estimate.json()["estimated_duration_minutes"] == max(
+        1, round(expected_distance / 25 * 60)
+    )
 
     estimate = client.post("/api/fare/estimate", headers=rider_auth, json={
         "ride_type": "tukTuk", "distance_km": 10
     })
     assert estimate.status_code == 200
     assert estimate.json()["estimated_fare"] == 6.5
+    assert estimate.json()["estimated_duration_minutes"] == 24
 
     booking = client.post("/api/rides", headers=rider_auth, json={
         "pickup_location": "Phnom Penh",
@@ -193,8 +218,12 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     })
     assert booking.status_code == 201, booking.text
     ride_id = booking.json()["ride_id"]
+    far_offers = client.get("/api/driver-rides", headers=far_auth).json()
+    assert all(item["id"] != ride_id for item in far_offers)
     assert client.put(f"/api/drivers/{late_driver['id']}/availability", headers=late_auth,
                       json={"availability": "online"}).status_code == 200
+    assert client.post("/api/driver-location", headers=late_auth,
+                       json={"latitude": 11.5601, "longitude": 104.9201}).status_code == 200
     late_offers = client.get("/api/driver-rides", headers=late_auth).json()
     assert any(item["id"] == ride_id for item in late_offers)
 
@@ -247,7 +276,7 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
     assert client.put(f"/api/driver-rides/{ride_id}", headers=driver_auth,
                       json={"status": "ongoing"}).status_code == 200
     assert client.post("/api/driver-location", headers=driver_auth,
-                       json={"latitude": 11.56, "longitude": 104.92}).status_code == 422
+                       json={"latitude": 11.56, "longitude": 104.92}).status_code == 409
     assert client.post("/api/driver-location?ride_id=9999", headers=driver_auth,
                        json={"latitude": 11.56, "longitude": 104.92}).status_code == 403
     assert client.post(f"/api/driver-location?ride_id={ride_id}", headers=driver_auth,
@@ -275,6 +304,29 @@ def test_ride_booking_matching_trip_completion_payment_and_rating(client):
                        json={"ride_id": ride_id, "score": 5, "comment": "Great ride"}).status_code == 201
     assert client.post("/api/ratings", headers=rider_auth,
                        json={"ride_id": ride_id, "score": 5}).status_code == 409
+    driver_completed = client.get("/api/driver-rides", headers=driver_auth).json()
+    completed_ride = next(item for item in driver_completed if item["id"] == ride_id)
+    assert not completed_ride["rated"]
+    assert client.post("/api/ratings", headers=driver_auth,
+                       json={"ride_id": ride_id, "score": 4,
+                             "comment": "Passenger was ready on time"}).status_code == 201
+    driver_completed = client.get("/api/driver-rides", headers=driver_auth).json()
+    completed_ride = next(item for item in driver_completed if item["id"] == ride_id)
+    assert completed_ride["rated"]
+    _, admin_id = api.execute(
+        "INSERT INTO users(name,email,password,role) VALUES(:name,:email,:password,'admin')",
+        {"name": "Ratings Admin", "email": "ratings-admin@example.com",
+         "password": api.password_hash.hash("admin-test-password")},
+    )
+    admin = api.rows(
+        "SELECT id,name,email,phone,role,availability FROM users WHERE id=:id",
+        {"id": admin_id},
+    )[0]
+    admin_ratings = client.get("/api/ratings", headers=auth(api.token_for(admin)))
+    assert admin_ratings.status_code == 200
+    assert {item["rater_name"] for item in admin_ratings.json()} >= {
+        rider["name"], driver["name"]
+    }
 
 
 def test_push_tokens_upsert_across_accounts(client):
@@ -318,6 +370,62 @@ def test_notification_attempts_fcm_delivery_without_blocking_inbox(client, monke
     assert sent[0][0]["tokens"] == [device_token]
     assert api.rows("SELECT title FROM notifications WHERE user_id=:user",
                     {"user": user["id"]})[0]["title"] == "Ride update"
+
+
+def test_khqr_payment_is_verified_before_receipt_is_recorded(client, monkeypatch):
+    rider, token = register(client, "rider", "khqr-payment")
+    _, ride_id = api.execute(
+        "INSERT INTO rides(rider_id,pickup_location,destination,ride_type,distance_km,"
+        "fare,status) VALUES(:rider,'Pickup','Destination','Car',5,6.50,'completed')",
+        {"rider": rider["id"]},
+    )
+    headers = auth(token)
+    monkeypatch.setattr(api, "BAKONG_API_TOKEN", "test-bakong-token")
+    monkeypatch.setattr(api, "BAKONG_ACCOUNT_ID", "rideapp@devb")
+    monkeypatch.setattr(api, "BAKONG_MERCHANT_NAME", "RideApp Test")
+    monkeypatch.setattr(api, "BAKONG_MERCHANT_CITY", "Phnom Penh")
+    monkeypatch.setattr(api, "BAKONG_PHONE_NUMBER", "85512000000")
+    monkeypatch.setattr(api, "create_bakong_qr", lambda amount: (
+        "000201-TEST-KHQR", "a" * 32
+    ))
+
+    created = client.post("/api/payments/khqr", headers=headers, json={"ride_id": ride_id})
+    assert created.status_code == 201, created.text
+    assert created.json()["amount"] == 6.5
+    assert client.post("/api/payments/khqr", headers=headers,
+                       json={"ride_id": ride_id}).json()["intent_id"] == created.json()["intent_id"]
+    intent_id = created.json()["intent_id"]
+    async def pending_transaction(_):
+        return None
+
+    monkeypatch.setattr(api, "fetch_bakong_payment", pending_transaction)
+    assert client.get(f"/api/payments/khqr/{intent_id}", headers=headers).json()["status"] == "pending"
+    assert api.rows("SELECT COUNT(*) AS count FROM payments WHERE ride_id=:ride",
+                    {"ride": ride_id})[0]["count"] == 0
+
+    async def paid_transaction(_):
+        return {"amount": 6.50, "currency": "USD", "toAccountId": "rideapp@devb",
+                "hash": "provider-transaction-hash"}
+
+    monkeypatch.setattr(api, "fetch_bakong_payment", paid_transaction)
+    other_rider, other_token = register(client, "rider", "other-khqr-rider")
+    assert client.get(f"/api/payments/khqr/{intent_id}", headers=auth(other_token)).status_code == 404
+    async def wrong_amount(_):
+        return {"amount": 6.49, "currency": "USD", "toAccountId": "rideapp@devb",
+                "hash": "wrong-amount-hash"}
+
+    monkeypatch.setattr(api, "fetch_bakong_payment", wrong_amount)
+    assert client.get(f"/api/payments/khqr/{intent_id}", headers=headers).status_code == 409
+    assert api.rows("SELECT COUNT(*) AS count FROM payments WHERE ride_id=:ride",
+                    {"ride": ride_id})[0]["count"] == 0
+    monkeypatch.setattr(api, "fetch_bakong_payment", paid_transaction)
+    paid = client.get(f"/api/payments/khqr/{intent_id}", headers=headers)
+    assert paid.status_code == 200 and paid.json()["status"] == "paid"
+    assert client.get(f"/api/payments/khqr/{intent_id}", headers=headers).json()["status"] == "paid"
+    receipt = client.get(f"/api/rides/{ride_id}/receipt", headers=headers)
+    assert receipt.status_code == 200 and receipt.json()["payment_method"] == "khqr"
+    assert api.rows("SELECT COUNT(*) AS count FROM payments WHERE ride_id=:ride",
+                    {"ride": ride_id})[0]["count"] == 1
 
 
 def test_direct_ride_needs_driver_set_fare_and_rejects_invalid_transition(client):

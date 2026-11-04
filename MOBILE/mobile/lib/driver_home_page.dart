@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
-import 'main.dart' show Api, NotificationBell, Session;
+import 'main.dart' show Api, NotificationBell, Session, formatFare;
 
 class DriverHomePage extends StatefulWidget {
   final Map<String, dynamic> user;
@@ -215,19 +215,19 @@ class _DriverHomePageState extends State<DriverHomePage>
     final token = await _token;
     if (!mounted) return;
     if (token == null) return;
-    double? finalFare;
-    if (status == 'completed' && ride['ride_type'] == 'Direct Ride') {
+    double? finalDistanceKm;
+    if (status == 'completed' && (ride['destination'] ?? '').toString().trim().isEmpty) {
       final controller = TextEditingController();
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: const Text('Set final fare'),
+          title: const Text('Record trip distance'),
           content: TextField(
             controller: controller,
             autofocus: true,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             decoration: const InputDecoration(
-                prefixText: '\$', labelText: 'Fare in USD'),
+                suffixText: ' km', labelText: 'Completed distance'),
           ),
           actions: [
             TextButton(
@@ -239,10 +239,10 @@ class _DriverHomePageState extends State<DriverHomePage>
           ],
         ),
       );
-      finalFare = double.tryParse(controller.text.trim());
+      finalDistanceKm = double.tryParse(controller.text.trim());
       controller.dispose();
-      if (confirmed != true || finalFare == null || finalFare < 0) {
-        if (confirmed == true) _message('Enter a valid fare.');
+      if (confirmed != true || finalDistanceKm == null || finalDistanceKm <= 0) {
+        if (confirmed == true) _message('Enter a valid trip distance.');
         return;
       }
     }
@@ -251,7 +251,7 @@ class _DriverHomePageState extends State<DriverHomePage>
           token: token,
           body: {
             'status': status,
-            if (finalFare != null) 'final_fare': finalFare
+            if (finalDistanceKm != null) 'final_distance_km': finalDistanceKm
           });
       await load();
     } catch (e) {
@@ -259,14 +259,33 @@ class _DriverHomePageState extends State<DriverHomePage>
     }
   }
 
+  Future<void> collectCash(Map<String, dynamic> ride) async {
+    final token = await _token;
+    if (!mounted || token == null) return;
+    try {
+      await Api.request('POST', '/payments',
+          token: token,
+          body: {
+            'ride_id': ride['id'],
+            'payment_method': 'cash',
+          });
+      _message('Cash payment collected & confirmed.');
+      await load();
+    } catch (e) {
+      _message(_friendly(e));
+    }
+  }
+
   Future<void> _syncLocationStream() async {
-    final activeRides = rides.where((ride) => ride['status'] == 'ongoing');
+    final activeRides = rides.where((ride) => ['accepted', 'arrived', 'ongoing'].contains(ride['status']));
     final active = activeRides.isEmpty ? null : activeRides.first;
-    if (active == null || availability != 'on_ride') {
+    final sharingTrip = active != null && availability == 'on_ride';
+    final sharingAvailability = active == null && availability == 'available';
+    if (!sharingTrip && !sharingAvailability) {
       await _stopLocationStream();
       return;
     }
-    final rideId = active['id'] as int;
+    final int? rideId = sharingTrip ? active['id'] as int : null;
     if (locationRideId == rideId && locationSubscription != null) return;
     if (locationPermissionBlocked) return;
 
@@ -297,10 +316,9 @@ class _DriverHomePageState extends State<DriverHomePage>
             distanceFilter: 10,
             intervalDuration: const Duration(seconds: 10),
             foregroundNotificationConfig: const ForegroundNotificationConfig(
-              notificationTitle: 'RideApp trip in progress',
-              notificationText:
-                  'Your location is being shared with your passenger.',
-              notificationChannelName: 'Active trip location',
+              notificationTitle: 'RideApp location sharing',
+              notificationText: 'Location is shared while you are online or on a trip.',
+              notificationChannelName: 'RideApp location sharing',
               setOngoing: true,
             ),
           )
@@ -327,14 +345,15 @@ class _DriverHomePageState extends State<DriverHomePage>
     await subscription?.cancel();
   }
 
-  Future<void> _sendLocation(int rideId, Position position) async {
+  Future<void> _sendLocation(int? rideId, Position position) async {
     if (locationRequestActive) return;
     locationRequestActive = true;
     try {
       if (locationRideId != rideId) return;
       final token = await _token;
       if (token == null) return;
-      await Api.request('POST', '/driver-location?ride_id=$rideId',
+      final rideQuery = rideId == null ? '' : '?ride_id=$rideId';
+      await Api.request('POST', '/driver-location$rideQuery',
           token: token,
           body: {
             'latitude': position.latitude,
@@ -369,7 +388,10 @@ class _DriverHomePageState extends State<DriverHomePage>
             ride['status'] == 'requested' && ride['driver_id'] == null)
         .toList();
     final assigned = rides
-        .where((ride) => ['accepted', 'ongoing'].contains(ride['status']))
+        .where((ride) => ['accepted', 'arrived', 'ongoing'].contains(ride['status']))
+        .toList();
+    final completed = rides
+        .where((ride) => ride['status'] == 'completed')
         .toList();
     return Scaffold(
       appBar: AppBar(
@@ -395,7 +417,7 @@ class _DriverHomePageState extends State<DriverHomePage>
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                  color: const Color(0xFF111827),
+                  color: const Color(0xFF212633),
                   borderRadius: BorderRadius.circular(22)),
               child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -480,6 +502,46 @@ class _DriverHomePageState extends State<DriverHomePage>
                   text: 'Accepted rides will appear here.'),
             ...assigned.map(
                 (ride) => _RideCard(ride: ride, actions: _activeActions(ride))),
+            if (completed.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const Text('Completed rides',
+                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
+              ...completed.map((ride) {
+                final isPaid = ride['paid'] == true ||
+                    ride['paid'] == 1 ||
+                    ride['payment_status'] == 'paid';
+                return _RideCard(
+                  ride: ride,
+                  actions: [
+                    if (!isPaid)
+                      FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF16A34A),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        ),
+                        onPressed: () => collectCash(ride),
+                        icon: const Icon(Icons.attach_money, size: 18),
+                        label: const Text('Collect Cash'),
+                      )
+                    else
+                      const Chip(
+                        avatar: Icon(Icons.check_circle, size: 16, color: Color(0xFF16A34A)),
+                        label: Text('Paid', style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF16A34A))),
+                        backgroundColor: Color(0xFFDCFCE7),
+                        side: BorderSide.none,
+                      ),
+                    if (ride['rated'] == true || ride['rated'] == 1)
+                      const Chip(label: Text('Passenger rated'))
+                    else
+                      OutlinedButton.icon(
+                        onPressed: () => ratePassenger(ride),
+                        icon: const Icon(Icons.star_outline),
+                        label: const Text('Rate passenger'),
+                      ),
+                  ],
+                );
+              }),
+            ],
             const SizedBox(height: 16),
             Row(children: [
               const Expanded(
@@ -522,19 +584,109 @@ class _DriverHomePageState extends State<DriverHomePage>
   List<Widget> _activeActions(Map<String, dynamic> ride) =>
       switch (ride['status']) {
         'accepted' => [
+            if ((ride['rider_phone'] ?? '').toString().isNotEmpty)
+              OutlinedButton.icon(
+                onPressed: () => _message('Passenger phone: ${ride['rider_phone']}'),
+                icon: const Icon(Icons.phone, size: 16),
+                label: const Text('Call'),
+              ),
             FilledButton.icon(
-                onPressed: () => updateRide(ride, 'ongoing'),
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('Start ride'))
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF0B3ACD),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onPressed: () => updateRide(ride, 'arrived'),
+              icon: const Icon(Icons.pin_drop, size: 18),
+              label: const Text('Arrived at Pickup'),
+            ),
+          ],
+        'arrived' => [
+            if ((ride['rider_phone'] ?? '').toString().isNotEmpty)
+              OutlinedButton.icon(
+                onPressed: () => _message('Passenger phone: ${ride['rider_phone']}'),
+                icon: const Icon(Icons.phone, size: 16),
+                label: const Text('Call'),
+              ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF16A34A),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onPressed: () => updateRide(ride, 'ongoing'),
+              icon: const Icon(Icons.play_arrow, size: 18),
+              label: const Text('Start Trip'),
+            ),
           ],
         'ongoing' => [
             FilledButton.icon(
-                onPressed: () => updateRide(ride, 'completed'),
-                icon: const Icon(Icons.flag_outlined),
-                label: const Text('Complete ride'))
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF264399),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onPressed: () => updateRide(ride, 'completed'),
+              icon: const Icon(Icons.flag_rounded, size: 18),
+              label: const Text('Complete Trip'),
+            ),
           ],
         _ => [],
       };
+
+  Future<void> ratePassenger(Map<String, dynamic> ride) async {
+    var score = 5;
+    final comment = TextEditingController();
+    final selectedScore = await showDialog<int>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setScore) => AlertDialog(
+          title: const Text('Rate your passenger'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                5,
+                (index) => IconButton(
+                  onPressed: () => setScore(() => score = index + 1),
+                  color: const Color(0xFFF59E0B),
+                  icon: Icon(index < score ? Icons.star : Icons.star_border),
+                ),
+              ),
+            ),
+            TextField(
+              controller: comment,
+              maxLength: 500,
+              decoration: const InputDecoration(labelText: 'Comment (optional)'),
+            ),
+          ]),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, score),
+              child: const Text('Submit rating'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selectedScore != null) {
+      try {
+        final token = await _token;
+        if (token == null) throw Exception('Please sign in again.');
+        await Api.request('POST', '/ratings', token: token, body: {
+          'ride_id': ride['id'],
+          'score': selectedScore,
+          'comment': comment.text.trim(),
+        });
+        if (mounted) _message('Passenger rating saved.');
+        await load(showLoading: false);
+      } catch (e) {
+        if (mounted) _message(_friendly(e));
+      }
+    }
+    comment.dispose();
+  }
 }
 
 class _RideCard extends StatelessWidget {
@@ -542,56 +694,204 @@ class _RideCard extends StatelessWidget {
   final List<Widget> actions;
   const _RideCard({required this.ride, required this.actions});
 
+  Widget _buildStepIndicator(String status) {
+    final steps = [
+      {'key': 'accepted', 'label': 'On the Way'},
+      {'key': 'arrived', 'label': 'Arrived'},
+      {'key': 'ongoing', 'label': 'In Trip'},
+      {'key': 'completed', 'label': 'Finished'},
+    ];
+    final int currentStep = switch (status) {
+      'accepted' => 0,
+      'arrived' => 1,
+      'ongoing' => 2,
+      'completed' => 3,
+      _ => -1,
+    };
+    if (currentStep == -1) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.only(top: 10, bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F4F6),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: List.generate(steps.length, (idx) {
+          final isPastOrCurrent = idx <= currentStep;
+          final isCurrent = idx == currentStep;
+          final label = steps[idx]['label']!;
+
+          return Expanded(
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 20,
+                        height: 20,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isPastOrCurrent
+                              ? (isCurrent ? const Color(0xFF0B3ACD) : const Color(0xFF16A34A))
+                              : const Color(0xFFD1D5DB),
+                        ),
+                        child: Center(
+                          child: isPastOrCurrent && !isCurrent
+                              ? const Icon(Icons.check, size: 12, color: Colors.white)
+                              : Text(
+                                  '${idx + 1}',
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
+                          color: isCurrent ? const Color(0xFF0B3ACD) : const Color(0xFF6B7280),
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                      ),
+                    ],
+                  ),
+                ),
+                if (idx < steps.length - 1)
+                  Container(
+                    width: 12,
+                    height: 2,
+                    color: idx < currentStep ? const Color(0xFF16A34A) : const Color(0xFFD1D5DB),
+                  ),
+              ],
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _buildStatusBadge(String status) {
+    final (label, color, bg) = switch (status) {
+      'requested' => ('New Request', const Color(0xFFD97706), const Color(0xFFFEF3C7)),
+      'accepted' => ('Going to Pickup', const Color(0xFF0B3ACD), const Color(0xFFE0E7FF)),
+      'arrived' => ('Waiting at Pickup', const Color(0xFF16A34A), const Color(0xFFDCFCE7)),
+      'ongoing' => ('Trip in Progress', const Color(0xFF264399), const Color(0xFFEDE9FE)),
+      'completed' => ('Completed', const Color(0xFF4B5563), const Color(0xFFF3F4F6)),
+      'cancelled' => ('Cancelled', const Color(0xFFDC2626), const Color(0xFFFEE2E2)),
+      _ => (status, const Color(0xFF4B5563), const Color(0xFFF3F4F6)),
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700),
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => Card(
-        elevation: 0,
-        margin: const EdgeInsets.only(top: 10),
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(17),
-            side: const BorderSide(color: Color(0xFFE5E7EB))),
-        child: Padding(
-            padding: const EdgeInsets.all(15),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                Text('Ride #${ride['id']}',
-                    style: const TextStyle(fontWeight: FontWeight.w800)),
-                const Spacer(),
-                Text((ride['ride_type'] ?? 'Car').toString(),
-                    style: const TextStyle(color: Color(0xFF6B7280)))
-              ]),
-              const SizedBox(height: 12),
-              _RouteLine(
-                  icon: Icons.trip_origin,
-                  text: (ride['pickup_location'] ?? 'Pickup unavailable')
-                      .toString()),
-              if ((ride['destination'] ?? '').toString().isNotEmpty) ...[
-                const SizedBox(height: 8),
-                _RouteLine(
-                    icon: Icons.location_on_outlined,
-                    text: ride['destination'].toString()),
-              ],
-              const SizedBox(height: 8),
-              Text('Passenger: ${ride['rider_name'] ?? 'RideApp passenger'}',
-                  style: const TextStyle(color: Color(0xFF6B7280))),
-              if (ride['fare'] != null || ride['estimated_fare'] != null) ...[
-                const SizedBox(height: 7),
+  Widget build(BuildContext context) {
+    final status = (ride['status'] ?? '').toString();
+    final isNewRequest = status == 'requested';
+
+    return Card(
+      elevation: isNewRequest ? 3 : 0,
+      margin: const EdgeInsets.only(top: 10),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: BorderSide(
+          color: isNewRequest ? const Color(0xFF0B3ACD) : const Color(0xFFE5E7EB),
+          width: isNewRequest ? 1.5 : 1,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
                 Text(
-                    'Fare ${ride['fare'] != null ? '· ' : 'estimate · '}\$${double.tryParse((ride['fare'] ?? ride['estimated_fare']).toString())?.toStringAsFixed(2) ?? '0.00'}',
-                    style: const TextStyle(fontWeight: FontWeight.w700)),
+                  'Ride #${ride['id']}',
+                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+                ),
+                const SizedBox(width: 8),
+                _buildStatusBadge(status),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF3F4F6),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    (ride['ride_type'] ?? 'Car').toString(),
+                    style: const TextStyle(color: Color(0xFF374151), fontSize: 11, fontWeight: FontWeight.w600),
+                  ),
+                ),
               ],
-              if (actions.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: actions
-                        .map((action) => Padding(
-                            padding: const EdgeInsets.only(left: 8),
-                            child: action))
-                        .toList()),
+            ),
+            if (!isNewRequest) _buildStepIndicator(status),
+            const SizedBox(height: 10),
+            _RouteLine(
+              icon: Icons.trip_origin,
+              text: (ride['pickup_location'] ?? 'Pickup unavailable').toString(),
+            ),
+            if ((ride['destination'] ?? '').toString().isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _RouteLine(
+                icon: Icons.location_on,
+                text: ride['destination'].toString(),
+              ),
+            ],
+            const Divider(height: 18),
+            Row(
+              children: [
+                const Icon(Icons.person_outline, size: 16, color: Color(0xFF6B7280)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Passenger: ${ride['rider_name'] ?? 'RideApp passenger'}${(ride['rider_phone'] ?? '').toString().isNotEmpty ? ' (${ride['rider_phone']})' : ''}',
+                    style: const TextStyle(color: Color(0xFF374151), fontSize: 13, fontWeight: FontWeight.w500),
+                  ),
+                ),
+                if (ride['fare'] != null || ride['estimated_fare'] != null)
+                  Text(
+                    formatFare(ride['fare'] ?? ride['estimated_fare'], ride['currency'] ?? 'KHR'),
+                    style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Color(0xFF0B3ACD)),
+                  ),
               ],
-            ])),
-      );
+            ),
+            if (actions.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: actions
+                    .map((action) => Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: action,
+                        ))
+                    .toList(),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _RouteLine extends StatelessWidget {

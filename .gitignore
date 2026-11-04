@@ -25,6 +25,17 @@
 **/.env
 **/.env.*
 !**/.env.example
+**/node_modules/
+**/dist/
+**/.idea/
+**/.tool-local/
+**/uvicorn*.log
+/MOBILE/archive/
+/admin/pnpm-lock.yaml
 
 # Keep the separate nested repository out of this repository's index.
-/Riding-App/
+/ARCHIVE/
+
+
+# Local database safety backups
+BACKEND/fastapi/backups/

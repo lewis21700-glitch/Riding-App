@@ -119,6 +119,13 @@ def main() -> int:
             json={"availability": "online"},
         )
         require(availability.status_code == 200, f"Driver onboarding failed: {availability.text}")
+        location = client.post(
+            "/api/driver-location",
+            headers=driver_headers,
+            json={"latitude": 11.56, "longitude": 104.92},
+        )
+        require(location.status_code == 200,
+                f"Online driver location setup failed: {location.text}")
         print("PASS driver onboarding, vehicle, and availability")
 
         estimate = client.post(
